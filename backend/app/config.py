@@ -26,21 +26,27 @@ def _env_float(key: str, default: float) -> float:
 
 @dataclass(frozen=True)
 class WorldConfig:
-    width: int = 80
-    height: int = 60
-    #: Simulated minutes advanced per tick.
-    minutes_per_tick: int = 10
+    width: int = 70
+    height: int = 50
+    #: Simulated minutes advanced per tick. Halved from 10 purely for visual
+    #: resolution: the renderer lerps in a straight line between ticks, so a
+    #: path that turned mid-tick got flattened into a diagonal slide.
+    minutes_per_tick: int = 5
     #: Sim starts on day 0 at 06:00 so agents wake into a fresh morning.
     start_hour: int = 6
-    #: Tiles an agent covers per tick. At 10 min/tick and ~50m tiles this is
-    #: roughly walking pace — one tile per tick meant 13 sim-hours to cross
-    #: town, so agents spent their whole lives commuting and every need starved.
-    tiles_per_tick: int = 12
+    #: Tiles an agent covers per tick. Deliberately below walking pace: 12 was
+    #: physically right but crossed the city in four seconds, which read as
+    #: teleporting. The map was shrunk to keep the needs budget balanced.
+    tiles_per_tick: int = 2
+
 
 @dataclass(frozen=True)
 class LoopConfig:
-    #: Real seconds between ticks at 1x speed. 1 sim day = 144 ticks = 2.4 min.
-    seconds_per_tick: float = _env_float("AC_SECONDS_PER_TICK", 1.0)
+    #: Real seconds between ticks at 1x speed. 1 sim day = 288 ticks = 2.4 min.
+    #: Halved alongside minutes_per_tick and tiles_per_tick, so sim-minutes per
+    #: real second and tiles per sim-minute are both unchanged — the needs
+    #: budget is identical, the motion is simply sampled twice as finely.
+    seconds_per_tick: float = _env_float("AC_SECONDS_PER_TICK", 0.5)
     #: Speeds selectable from the UI.
     speed_options: tuple[float, ...] = (0.0, 0.5, 1.0, 2.0, 4.0, 8.0)
     default_speed: float = 1.0

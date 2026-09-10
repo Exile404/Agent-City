@@ -36,6 +36,14 @@ class BuildingKind(str, Enum):
     CAFE = "cafe"
     PARK = "park"
     GYM = "gym"
+    #: Utilities and services. They exist to be employers, not scenery — a job
+    #: market with three software firms has no texture to it.
+    POWER = "power"
+    GAS = "gas"
+    HOSPITAL = "hospital"
+    MARKET = "market"
+    LIBRARY = "library"
+    BANK = "bank"
 
 
 @dataclass

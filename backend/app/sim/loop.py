@@ -18,7 +18,7 @@ from app.sim.clock import TICKS_PER_DAY, Clock
 from app.sim.layout import build_city
 from app.sim.pathing import PathCache
 from app.sim.spawn import spawn_agents
-from app.sim.world import Building, BuildingKind
+from app.sim.world import Building, BuildingKind, TileKind
 
 #: Need -> (what fixes it, where it happens). None means the agent's own home.
 #: Data rather than branches, so new needs are one line each.
@@ -36,6 +36,12 @@ class Simulation:
         self.clock = Clock()
         self.world = build_city()
         self.paths = PathCache(self.world)
+        # Interior floor tiles per building, precomputed once. Agents step onto
+        # one of these on arrival instead of standing on the doorstep.
+        self._interiors: dict[str, list[tuple[int, int]]] = {
+            b.id: [t for t in b.tiles() if self.world.tile(*t) is TileKind.FLOOR]
+            for b in self.world.buildings.values()
+        }
         self.events: deque[tuple[int, str]] = deque(maxlen=200)
         self.agents = spawn_agents(self.world, self.rng)
 
@@ -99,9 +105,24 @@ class Simulation:
             return Action(ActionKind.IDLE)
         return self._travel_to(agent, target, kind)
 
+    def _interior_spot(self, building_id: str, agent: Agent) -> tuple[int, int] | None:
+        """A stable spot inside a building for this agent.
+
+        Indexed by agent number rather than chosen at random, so each person
+        keeps the same desk or bed instead of shuffling around on every visit.
+        """
+        spots = self._interiors.get(building_id)
+        if not spots:
+            return None
+        return spots[int(agent.id[1:]) % len(spots)]
+
     def _travel_to(self, agent: Agent, building: Building, then_kind: ActionKind) -> Action:
         arrive = Action(then_kind, target_id=building.id)
-        path = self.paths.path(agent.pos, building.door)
+        # Walk all the way to the spot indoors, not just to the doorstep.
+        # Stopping at the door and snapping inside was a visible teleport at the
+        # end of every journey.
+        goal = self._interior_spot(building.id, agent) or building.door
+        path = self.paths.path(agent.pos, goal)
         if path is None:
             # Unreachable. Idle and retry — the cache remembers the failure, so
             # the retry is a dict hit rather than another search.
