@@ -4,10 +4,10 @@ A living city of 50 LLM agents who study at university, interview for jobs, get
 hired, and work under a management hierarchy — running entirely on a single
 consumer GPU, with no cloud API.
 
-> **Status: Phase 1 complete.** The city runs live in the browser — 50 agents
-> with needs and pathfinding, walking a 3D city streamed over a WebSocket.
-> Cognition (Phase 2) and the institutions that make it a *career* simulation
-> (Phases 4–6) are not built yet. The roadmap below marks exactly what exists.
+> **Status: Phase 2 complete.** Agents have a memory stream and plan their own
+> days on a local 7B/3B model, admitted through a cognition scheduler that
+> rations a measured GPU budget. The institutions that make it a *career*
+> simulation (Phases 4–6) are not built yet. The roadmap marks what exists.
 
 ## The constraint that shapes everything
 
@@ -53,9 +53,15 @@ This keeps the city coherent, cheap, and replayable.
 
 Tier 0 is what makes the city look continuously alive: needs decay, path
 following, action execution, and critical-need overrides. No agent ever blocks
-waiting on a model. A planned cognition scheduler admits Tier 1/2 requests by
-priority within a per-tick budget; everything that doesn't win a slot degrades
-gracefully to Tier 0.
+waiting on a model.
+
+The cognition scheduler admits Tier 1/2 requests by priority within a per-tick
+budget; anything that doesn't win a slot degrades to Tier 0 and re-asks next
+tick with a priority that has risen slightly. Measured over two simulated days
+with 50 agents: **2.15 plans per agent per day, 0 dropped as stale, 0 errors,
+and roughly a third of agents model-driven at any instant.** The remaining
+two-thirds running on Tier 0 is the design working, not a shortfall — the GPU
+affords about four inferences a second and reflexes carry everything between.
 
 ## Roadmap
 
@@ -63,7 +69,7 @@ gracefully to Tier 0.
 |---|---|---|
 | 0 | World grid, A* pathing, needs, actions, tick loop | ✅ Done |
 | 1 | FastAPI + WebSocket, Three.js renderer, time controls | ✅ Done |
-| 2 | Memory stream, LLM client, tiered scheduler, daily plans | ⬜ |
+| 2 | Memory stream, LLM client, tiered scheduler, daily plans | ✅ Done |
 | 3 | Co-location conversations, relationships, event feed | ⬜ |
 | 4 | University: courses, exams, skill growth, credentials | ⬜ |
 | 5 | Companies, job postings, LLM interviews, hiring | ⬜ |
@@ -126,6 +132,31 @@ frontend/src/
   state/           WebSocket client, snapshot store
 ```
 
+## How an agent thinks
+
+An agent **asks** to think; the scheduler decides who actually gets to. Fifty
+agents ask roughly 500 times a tick and about 1 is admitted — a ~2% admission
+rate that is the whole point, not a fault.
+
+An admitted thought runs entirely off the tick path:
+
+1. **Embed** any memories still carrying a placeholder vector — batched, because
+   one embedding costs ~209ms of round trip while thirty-two cost 90ms in total.
+2. **Retrieve** with relevance gating the candidate set and recency plus
+   importance ordering what is already on topic, each component min-max
+   normalised across the candidates and anything below 85% of the best match
+   dropped rather than padding the result out.
+3. **Prompt** with a closed vocabulary — the model chooses from real actions at
+   legal places, because a 3B model will otherwise happily invent
+   `"search_for_restaurant"`.
+4. **Validate** the reply against that vocabulary. Malformed steps are dropped
+   and an empty plan simply means Tier 0. A bad generation can never stall an
+   agent.
+
+The simulation never awaits a model. Requests are fire-and-forget, answers apply
+on whatever tick they land, and anything older than its staleness window is
+discarded rather than acted on.
+
 ## The city
 
 A 70×50 grid on a 10-tile road pitch with 2-tile carriageways, giving 7×5 blocks
@@ -160,6 +191,30 @@ state machine and agents can't arrive having forgotten why they came.
 
 **Needs decay and restore independently, every tick.** Sleeping still burns
 hunger, so agents wake rested and starving without anyone writing that rule.
+
+**Importance is assigned, not asked for.** Scoring each memory with a model call
+would cost ~1,000 calls a day against a ~190/day budget — more than the entire
+dialogue allowance, to rate things like "walked to a cafe". Memory kinds carry
+default weights instead.
+
+**Min-max normalisation is what makes retrieval weights mean anything.** Recency
+and importance naturally reach 1.0 while cosine similarity rarely passes 0.6, so
+without rescaling across the candidate set an on-topic memory could never
+outrank a merely recent one. Normalising raised precision@8 from 50% to 60%;
+dropping candidates below 85% of the best match rather than padding to k raised
+it to 83%.
+
+**Retrieval halves a memory's age rather than resetting it.** A full reset pins
+every retrieved memory at maximum recency, so the same handful wins every
+subsequent query and the agent's mind freezes on whatever it thought about first.
+
+**Plan steps are validated against when the agent asked, not when the reply
+landed.** Measured drift between the two was 35-135 simulated minutes, which was
+silently discarding an agent's earliest intentions as "already past".
+
+**Late plan steps execute; ancient ones are dropped.** Draining every overdue
+step at once burned a full-day plan in ninety minutes. Taking the earliest step
+still inside a two-hour grace window more than doubled how long a plan survives.
 
 **Density beat vehicles.** Journeys averaged 42 tiles — 1.8 sim-hours on foot —
 so cars were added to make a large map affordable. They looked wrong and solved
