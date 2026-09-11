@@ -82,17 +82,21 @@ class LLMConfig:
     request_timeout: float = _env_float("AC_LLM_TIMEOUT", 90.0)
     #: Drop a queued request if the sim has moved this far past its submission.
     #: Prevents an agent acting on advice that is an hour of sim-time stale.
-    staleness_ticks: int = 18
+    staleness_ticks: int = 36
 
     enabled: bool = os.environ.get("AC_LLM_ENABLED", "1") != "0"
 
 
 @dataclass(frozen=True)
 class MemoryConfig:
-    #: Retrieval weights: score = recency*w_r + importance*w_i + relevance*w_v.
+    #: Retrieval weights: score = recency*w_r + importance*w_i + relevance*w_v,
+    #: each min-max normalised across the candidates first. Relevance is
+    #: weighted up because these are targeted queries ("I am hungry") rather
+    #: than the broad reflection queries the weights were originally tuned for —
+    #: at parity the newest memory wins every question regardless of topic.
     w_recency: float = 1.0
     w_importance: float = 1.0
-    w_relevance: float = 1.2
+    w_relevance: float = 1.8
     #: Memory strength halves every N sim-hours of non-retrieval.
     recency_half_life_hours: float = 12.0
     #: Retrieved memories injected into a prompt.
@@ -101,6 +105,7 @@ class MemoryConfig:
     reflection_importance_threshold: float = 45.0
     #: Hard cap per agent; oldest low-importance memories are evicted first.
     max_memories: int = 300
+    relevance_floor: float = 0.85
 
 
 @dataclass(frozen=True)
@@ -128,6 +133,25 @@ class EconomyConfig:
 
 
 @dataclass(frozen=True)
+class CognitionConfig:
+    #: Thoughts admitted per tick. Measured: the smart lane runs 2 concurrent at
+    #: ~1.6s each = 1.22 calls/sec, and a tick is 0.5s — so ~0.6/tick is what the
+    #: GPU actually drains. At 2 the queue sat permanently full, which meant
+    #: priority only applied at the moment a slot freed rather than across a
+    #: real candidate set.
+    admissions_per_tick: int = 1
+    #: Hard cap on dispatched-but-unfinished thoughts. Queue deeper than this
+    #: and answers start arriving after their staleness window has closed,
+    #: which burns GPU time to produce nothing.
+    max_outstanding: int = 8
+    #: Re-plan at least this often in sim-minutes, even mid-plan. Measured:
+    #: re-planning every 4 hours needs 2.08 plans/sec across 50 agents, and the
+    #: GPU delivers ~0.7 — demand was 2.6x supply. Twice a day (morning and
+    #: evening) needs 0.69/sec, which matches almost exactly.
+    replan_minutes: int = 720
+
+
+@dataclass(frozen=True)
 class Config:
     world: WorldConfig = field(default_factory=WorldConfig)
     loop: LoopConfig = field(default_factory=LoopConfig)
@@ -136,7 +160,10 @@ class Config:
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     needs: NeedsConfig = field(default_factory=NeedsConfig)
     economy: EconomyConfig = field(default_factory=EconomyConfig)
+    cognition: CognitionConfig = field(default_factory=CognitionConfig)
     seed: int = _env_int("AC_SEED", 20260827)
 
+
+CONFIG = Config()
 
 CONFIG = Config()

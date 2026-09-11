@@ -19,6 +19,7 @@ from app.sim.layout import build_city
 from app.sim.pathing import PathCache
 from app.sim.spawn import spawn_agents
 from app.sim.world import Building, BuildingKind, TileKind
+from app.cognition.prompts import PlanStep
 
 #: Need -> (what fixes it, where it happens). None means the agent's own home.
 #: Data rather than branches, so new needs are one line each.
@@ -44,7 +45,8 @@ class Simulation:
         }
         self.events: deque[tuple[int, str]] = deque(maxlen=200)
         self.agents = spawn_agents(self.world, self.rng)
-
+        #: Lookup for the cognition pipeline, which works from agent ids.
+        self.by_id = {a.id: a for a in self.agents}
         # spawn builds actions directly, so they carry no deadline. Run each
         # through _begin to hold the invariant that every action an agent owns
         # has been properly started — otherwise the opening IDLE never ends.
@@ -89,12 +91,73 @@ class Simulation:
             )
 
     def _choose_action(self, agent: Agent) -> Action:
-        """Tier 0 brain: repair whatever is worst.
+        """Three layers, strict priority.
 
-        Crude on purpose. It yields a legible daily rhythm for free, and it is
-        precisely the function Phase 2 swaps out for a planned day.
+        A critical need overrides any plan — an agent about to collapse from
+        hunger does not keep a study appointment. Otherwise follow the plan.
+        Tier 0 is the floor: it always has an answer, so no agent is ever left
+        without one because a model was busy.
         """
-        need, _ = agent.needs.lowest()
+        critical = agent.needs.critical()
+        if critical is not None:
+            return self._remedy(agent, critical)
+
+        step = self._due_step(agent)
+        if step is not None:
+            action = self._follow(agent, step)
+            if action is not None:
+                return action
+
+        return self._remedy(agent, agent.needs.lowest()[0])
+
+    #: How late a plan step may be and still worth doing, in sim-minutes. A step
+    #: costs travel plus its duration, so running an hour or so behind is normal
+    #: and should not throw the rest of the day away.
+    STEP_GRACE_MINUTES = 120
+
+    def _due_step(self, agent: Agent) -> PlanStep | None:
+        """The earliest step that is due and still worth doing.
+
+        Takes one step at a time rather than draining everything overdue: an
+        agent running late should keep following its plan in order, just late.
+        Only genuinely ancient steps are dropped, so nobody works through
+        backed-up appointments at three in the morning.
+        """
+        now = self.clock.minute_of_day
+        while agent.plan:
+            step = agent.plan[0]
+            if step.at > now:
+                return None  # next step is still in the future
+            agent.plan.pop(0)
+            if now - step.at <= self.STEP_GRACE_MINUTES:
+                return step
+            # too old to be meaningful — discard and consider the next one
+        return None
+
+    def _follow(self, agent: Agent, step: PlanStep) -> Action | None:
+        """Turn a plan step into an action, or None if it cannot be honoured.
+
+        The plan names a building *kind*; the nearest one is resolved now rather
+        than when the plan was written, so it stays sensible even if the agent
+        has ended up on the other side of the city since.
+        """
+        if step.place == "home":
+            target = self.world.buildings.get(agent.home_id)
+        else:
+            try:
+                target = self.world.nearest(BuildingKind(step.place), agent.pos)
+            except ValueError:
+                return None
+        if target is None:
+            return None
+
+        agent.memory.add(
+            self.clock.tick, "plan", f"Went to {target.name} to {step.kind.value}: {step.why}"
+        )
+        return self._travel_to(agent, target, step.kind)
+
+    def _remedy(self, agent: Agent, need: str) -> Action:
+        """Tier 0. Free, deterministic, and always has an answer."""
         kind, place = NEED_REMEDY[need]
         target = (
             self.world.buildings[agent.home_id]

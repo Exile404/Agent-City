@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 
 from app.agents.actions import RESTORES, Action
 from app.config import CONFIG
+from app.cognition.memory import MemoryStream
+from app.cognition.prompts import PlanStep
 
 SKILLS = ("programming", "analysis", "communication", "design", "management")
 
@@ -64,6 +66,11 @@ class Agent:
     #: Looked up by name at runtime by courses, job specs and interview rubrics.
     skills: dict[str, float] = field(default_factory=dict)
     money: float = 0.0
+    memory: MemoryStream = field(default_factory=MemoryStream)
+    #: Remaining steps of today's plan, in time order. Empty means Tier 0.
+    plan: list[PlanStep] = field(default_factory=list)
+    #: Far in the past so every agent looks overdue on the first tick.
+    last_plan_tick: int = -10_000
 
     @property
     def pos(self) -> tuple[int, int]:
