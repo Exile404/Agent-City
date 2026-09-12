@@ -26,6 +26,13 @@ type AgentDetail = {
   needs: Record<string, number>
   skills: Record<string, number>
   money: number
+  relationships: {
+    name: string
+    affinity: number
+    label: string
+    timesMet: number
+    note: string
+  }[]
 }
 
 function Panel({ children, className = '' }: { children: ReactNode; className?: string }) {
@@ -55,6 +62,32 @@ function Bar({ label, value }: { label: string; value: number }) {
       <span className="w-7 text-right text-[11px] tabular-nums text-muted">
         {Math.round(value)}
       </span>
+    </div>
+  )
+}
+
+function Relation({ r }: { r: AgentDetail['relationships'][number] }) {
+  // Same hue vocabulary as Bar, but keyed to the sim's own label thresholds
+  // rather than a 0-100 scale: affinity runs -100..100 and the boundaries that
+  // matter are the ones Relationship.label uses.
+  const hue = r.affinity < -25 ? 0 : r.affinity > 15 ? 145 : 38
+  return (
+    <div className="border-b border-[#1e1e28] py-1.5">
+      <div className="flex items-baseline gap-2">
+        <span className="flex-1 truncate text-xs">{r.name}</span>
+        <span className="text-[11px] text-muted">{r.timesMet}×</span>
+        <span
+          className="w-9 text-right text-[11px] tabular-nums"
+          style={{ color: `hsl(${hue} 62% 55%)` }}
+        >
+          {r.affinity > 0 ? '+' : ''}
+          {r.affinity.toFixed(0)}
+        </span>
+      </div>
+      <div className="text-[11px] text-muted">{r.label}</div>
+      {r.note && (
+        <div className="mt-0.5 truncate text-[11px] text-muted italic">“{r.note}”</div>
+      )}
     </div>
   )
 }
@@ -178,6 +211,18 @@ export default function App() {
             {Object.entries(detail.skills).map(([k, v]) => (
               <Bar key={k} label={k} value={v} />
             ))}
+
+            {/* Guarded on length: the inspector re-fetches every second, and an
+                agent who has met nobody returns [], which would otherwise flash
+                a heading over an empty list. */}
+            {detail.relationships?.length ? (
+              <>
+                <Title>Knows</Title>
+                {detail.relationships.map((r) => (
+                  <Relation key={r.name} r={r} />
+                ))}
+              </>
+            ) : null}
           </Panel>
         )}
 

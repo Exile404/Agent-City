@@ -70,14 +70,30 @@ class LLMConfig:
     #: Tier 1 — fast, high-volume routine decisions (next action, small choices).
     fast_model: str = os.environ.get("AC_FAST_MODEL", "qwen2.5:3b")
     #: Tier 2 — meaningful moments (daily plans, dialogue, interviews, reflection).
-    smart_model: str = os.environ.get("AC_SMART_MODEL", "qwen2.5:7b-instruct-q4_K_M")
+    #: The same model as Tier 1, deliberately. A 7b-q4 alongside it meant three
+    #: resident models costing 3.5GB of *host* RAM — Ollama runs llama-server with
+    #: --no-mmap, so weights are copied into system memory even when they sit 100%
+    #: on the GPU. On a 15GiB machine that was enough for the kernel OOM killer to
+    #: take the desktop session down. The lane split stays because it still buys
+    #: separate admission control; it is no longer a split between two models.
+    smart_model: str = os.environ.get("AC_SMART_MODEL", "qwen2.5:3b")
     #: Optional; falls back to a lexical vector when the model isn't pulled.
     embed_model: str = os.environ.get("AC_EMBED_MODEL", "nomic-embed-text")
 
-    #: Concurrent in-flight requests per tier. Tuned for a single 16GB GPU:
-    #: too high and the models thrash VRAM, too low and the queue backs up.
-    fast_concurrency: int = _env_int("AC_FAST_CONCURRENCY", 4)
-    smart_concurrency: int = _env_int("AC_SMART_CONCURRENCY", 2)
+    #: Concurrent in-flight requests per tier. These are only real if Ollama has
+    #: at least this many slots: it launches llama-server with `-np 1` by default,
+    #: one request at a time per model, so surplus requests queue *inside* Ollama
+    #: and expire against staleness_ticks having never run — measured at 15 of 60
+    #: plan requests dropped unserved. OLLAMA_NUM_PARALLEL=2 fixes that (drops went
+    #: to zero), and slots are not free: at 4 slots llama-server held 4.5GB of host
+    #: RAM for a model that occupies 2.4GB of VRAM, because each slot carries its
+    #: own KV cache and --no-mmap copies the weights into system memory as well.
+    #: Kept just above the slot count — a bounded overshoot, not the 4-against-1
+    #: that was expiring requests. With both lanes on one model the split is now a
+    #: policy reservation, holding a slot for dialogue so planning cannot starve
+    #: it, rather than a boundary between two models.
+    fast_concurrency: int = _env_int("AC_FAST_CONCURRENCY", 2)
+    smart_concurrency: int = _env_int("AC_SMART_CONCURRENCY", 1)
 
     request_timeout: float = _env_float("AC_LLM_TIMEOUT", 90.0)
     #: Drop a queued request if the sim has moved this far past its submission.
@@ -134,8 +150,8 @@ class EconomyConfig:
 
 @dataclass(frozen=True)
 class CognitionConfig:
-    #: Thoughts admitted per tick. Measured: the smart lane runs 2 concurrent at
-    #: ~1.6s each = 1.22 calls/sec, and a tick is 0.5s — so ~0.6/tick is what the
+    #: Thoughts admitted per tick. Measured: the fast lane runs 2 concurrent at
+    #: 2.46s each = 0.81 calls/sec, and a tick is 0.5s — so ~0.41/tick is what the
     #: GPU actually drains. At 2 the queue sat permanently full, which meant
     #: priority only applied at the moment a slot freed rather than across a
     #: real candidate set.
@@ -149,6 +165,20 @@ class CognitionConfig:
     #: GPU delivers ~0.7 — demand was 2.6x supply. Twice a day (morning and
     #: evening) needs 0.69/sec, which matches almost exactly.
     replan_minutes: int = 720
+    #: Conversations generating at once. Measured, this cap *is* the budget — a
+    #: whole exchange takes 1.59s on the 3b, and with smart_concurrency at 1 the
+    #: second slot waits on the first, so the pair drains 0.27 conversations per
+    #: tick. No separate rate limit is needed; the cap is the rate limit.
+    max_chats: int = 2
+    #: Interest below which a pair gets only the Tier 0 greeting. Measured 1.5
+    #: encounters per tick against a 0.27 budget, so about one in five can afford
+    #: words — 3.1 real conversations per agent per sim-day.
+    #: 2.0 leaves about 0.8 candidates per tick, deliberately well above the
+    #: budget: refusing a candidate costs nothing (it still gets the greeting),
+    #: while having fewer candidates than slots wastes the GPU outright. At 4.0
+    #: that is exactly what happened — the gate was above the entire steady-state
+    #: score range, so from day three the smart lane ran at 15% of capacity.
+    chat_min_interest: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -163,7 +193,5 @@ class Config:
     cognition: CognitionConfig = field(default_factory=CognitionConfig)
     seed: int = _env_int("AC_SEED", 20260827)
 
-
-CONFIG = Config()
 
 CONFIG = Config()

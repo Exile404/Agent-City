@@ -54,9 +54,14 @@ def hello_message(sim: Simulation) -> dict:
     }
 
 
-def tick_message(sim: Simulation) -> dict:
+def tick_message(sim: Simulation, since_total: int) -> dict:
     """What changed. Sent every tick."""
     tick = sim.clock.tick
+    # Everything logged since the last frame, not everything stamped with the
+    # current tick. Plans and conversations complete asynchronously, after their
+    # tick's frame has already gone out, so a `t == tick` filter dropped them
+    # entirely — the feed only ever showed events raised inside sim.tick().
+    fresh = sim.events_total - since_total
     return {
         "type": "tick",
         "t": tick,
@@ -65,11 +70,10 @@ def tick_message(sim: Simulation) -> dict:
         # would be silly when the clock already knows the number.
         "minuteOfDay": sim.clock.minute_of_day,
         "agents": [[a.x, a.y, a.action.kind.value] for a in sim.agents],
-        # Events carry their own tick, so "this tick's" is a filter rather than a
-        # read cursor the server would have to track per client.
-        "events": [text for t, text in sim.events if t == tick],
+        # The `fresh > 0` guard is load-bearing: list[-0:] is the whole list,
+        # which would replay all 200 events on every quiet tick.
+        "events": [text for _, text in list(sim.events)[-fresh:]] if fresh > 0 else [],
     }
-
 
 def agent_detail(sim: Simulation, agent_id: str) -> dict | None:
     """Full state for the inspector panel. Fetched on click, never streamed."""
@@ -86,5 +90,21 @@ def agent_detail(sim: Simulation, agent_id: str) -> dict | None:
                 "needs": {k: round(v, 1) for k, v in a.needs.as_dict().items()},
                 "skills": {k: round(v, 1) for k, v in a.skills.items()},
                 "money": round(a.money, 2),
+                # Ordered by how strongly they feel rather than how warmly, so a
+                # rivalry is as visible as a friendship, and capped: an agent who
+                # has met forty people would push everything else off the panel.
+                "relationships": [
+                    {
+                        "name": sim.by_id[other_id].name,
+                        "affinity": round(rel.affinity, 1),
+                        "label": rel.label,
+                        "timesMet": rel.times_met,
+                        "note": rel.note,
+                    }
+                    for other_id, rel in sorted(
+                        a.relationships.items(), key=lambda kv: -abs(kv[1].affinity)
+                    )[:8]
+                    if other_id in sim.by_id
+                ],
             }
     return None

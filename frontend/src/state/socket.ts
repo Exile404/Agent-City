@@ -130,6 +130,14 @@ export class CityStore {
     ws.onerror = () => ws.close()
 
     ws.onclose = () => {
+      // Only the current socket may reconnect. React StrictMode remounts the
+      // effect in dev, so disconnect() and a fresh connect() interleave: this
+      // handler fires *after* the new socket has already reset `stopped`, and
+      // would then schedule its own replacement. That left two live connections
+      // feeding one singleton store — every tick applied twice, every event
+      // listed twice — and leaked the superseded socket's message handler.
+      if (this.ws !== ws) return
+
       this.status = 'closed'
       this.emit()
       if (this.stopped) return

@@ -20,6 +20,7 @@ from app.sim.pathing import PathCache
 from app.sim.spawn import spawn_agents
 from app.sim.world import Building, BuildingKind, TileKind
 from app.cognition.prompts import PlanStep
+from app.agents.relationships import Relationship, conversation_interest, trait_rapport
 
 #: Need -> (what fixes it, where it happens). None means the agent's own home.
 #: Data rather than branches, so new needs are one line each.
@@ -44,6 +45,9 @@ class Simulation:
             for b in self.world.buildings.values()
         }
         self.events: deque[tuple[int, str]] = deque(maxlen=200)
+        #: Total events ever logged. The deque is capped, so its length stops
+        #: being a usable cursor the moment it fills; this never resets.
+        self.events_total = 0
         self.agents = spawn_agents(self.world, self.rng)
         #: Lookup for the cognition pipeline, which works from agent ids.
         self.by_id = {a.id: a for a in self.agents}
@@ -52,11 +56,24 @@ class Simulation:
         # has been properly started — otherwise the opening IDLE never ends.
         for agent in self.agents:
             self._begin(agent, agent.action)
+        #: (a, b, interest) for pairs that met on the most recent tick, scored
+        #: before greeting. The cognition pipeline promotes the best of them.
+        self.last_encounters: list[tuple[Agent, Agent, float]] = []
+
     def tick(self) -> None:
         self.clock.advance()
         hours = CONFIG.world.minutes_per_tick / 60.0
         for agent in self.agents:
             self._step(agent, hours)
+        # Resolved and stored: greet() puts every pair on cooldown, so calling
+        # encounters() again after a tick returns an empty list.
+        #
+        # Scored before greeting, not after: greet() stamps last_talked_tick and
+        # bumps times_met, which are the facts the score reads. Reverse the order
+        # and every pair looks like acquaintances who just spoke.
+        self.last_encounters = [(a, b, self._interest(a, b)) for a, b in self.encounters()]
+        for a, b, _ in self.last_encounters:
+            self.greet(a, b)
 
     def _step(self, agent: Agent, hours: float) -> None:
         agent.tick_needs(hours)
@@ -72,6 +89,18 @@ class Simulation:
         elif action.is_done(self.clock.tick):
             self._begin(agent, self._choose_action(agent))
 
+    def log(self, text: str) -> None:
+        """Record a feed event.
+
+        Counted as well as stored, because not everything is logged from the
+        tick path: a plan landing or a conversation finishing happens several
+        ticks after it was requested, and stamping it with the tick it completed
+        on is useless to a consumer that has already sent that tick's frame.
+        Readers track the total instead.
+        """
+        self.events_total += 1
+        self.events.append((self.clock.tick, text))
+
     def _begin(self, agent: Agent, action: Action) -> None:
         """Stamp the finish time, then commit.
 
@@ -84,11 +113,16 @@ class Simulation:
             action.ends_at = self.clock.tick + max(1, minutes // CONFIG.world.minutes_per_tick)
 
         agent.action = action
+
         if action.kind not in (ActionKind.TRAVEL, ActionKind.IDLE):
             where = self.world.buildings[action.target_id].name if action.target_id else "here"
-            self.events.append(
-                (self.clock.tick, f"{agent.name} began {action.kind.value} at {where}")
-            )
+            self.log(f"{agent.name} began {action.kind.value} at {where}")
+            # Sleep is excluded: it happens nightly and tells nobody anything.
+            # The rest gives agents something to talk about besides who they met.
+            if action.kind is not ActionKind.SLEEP:
+                agent.memory.add(
+                    self.clock.tick, "observation", f"{action.kind.value.capitalize()} at {where}"
+                )
 
     def _choose_action(self, agent: Agent) -> Action:
         """Three layers, strict priority.
@@ -193,6 +227,82 @@ class Simulation:
         if not path:
             return arrive
         return Action(ActionKind.TRAVEL, target_id=building.id, path=path, then=arrive)
+
+    #: Sim-minutes before the same two agents may talk again.
+    TALK_COOLDOWN_MINUTES = 180
+
+    def encounters(self) -> list[tuple[Agent, Agent]]:
+        """Pairs currently able to hold a conversation.
+
+        Both must be stationary, awake, and inside the same building. Sleepers,
+        travellers and idlers are excluded — there is nobody to talk to on a road
+        tile, and an agent asleep is not available.
+        """
+        by_place: dict[str, list[Agent]] = {}
+        for agent in self.agents:
+            action = agent.action
+            if action.target_id is None:
+                continue
+            if action.kind in (ActionKind.TRAVEL, ActionKind.IDLE, ActionKind.SLEEP):
+                continue
+            by_place.setdefault(action.target_id, []).append(agent)
+
+        cooldown = self.TALK_COOLDOWN_MINUTES // CONFIG.world.minutes_per_tick
+        # Seeded on the tick: pairings rotate so two regulars don't monopolise a
+        # busy cafe, but the run stays reproducible.
+        shuffler = Random(self.clock.tick)
+
+        pairs: list[tuple[Agent, Agent]] = []
+        for group in by_place.values():
+            if len(group) < 2:
+                continue
+            group.sort(key=lambda a: a.id)
+            shuffler.shuffle(group)
+            for i in range(0, len(group) - 1, 2):
+                a, b = group[i], group[i + 1]
+                rel = a.relationships.get(b.id)
+                if rel and self.clock.tick - rel.last_talked_tick < cooldown:
+                    continue
+                pairs.append((a, b))
+        return pairs
+
+    def _interest(self, a: Agent, b: Agent) -> float:
+        """What a generated conversation between these two would be worth."""
+        rel = a.relationships.get(b.id)
+        hours = (
+            (self.clock.tick - rel.last_talked_tick) * CONFIG.world.minutes_per_tick / 60.0
+            if rel is not None
+            else 1e4  # never met: effectively infinite time since
+        )
+        return conversation_interest(
+            relationship=rel,
+            social_a=a.needs.social,
+            social_b=b.needs.social,
+            hours_since=hours,
+        )
+
+    def greet(self, a: Agent, b: Agent) -> None:
+        """Tier 0 encounter — what happens to the overwhelming majority.
+
+        Two people cross paths, acknowledge each other, feel slightly less alone,
+        and drift a little closer or further apart according to temperament. No
+        model involved: at 1.5 encounters per tick against a budget of 0.27, only
+        about one in five can afford words.
+        """
+        tick = self.clock.tick
+        for x, y in ((a, b), (b, a)):
+            rel = x.relationships.setdefault(y.id, Relationship())
+            if rel.times_met == 0:
+                x.memory.add(tick, "observation", f"Met {y.name} for the first time")
+            rel.times_met += 1
+            rel.last_talked_tick = tick
+            rel.affinity = max(
+                -100.0,
+                min(100.0, rel.affinity + trait_rapport(x.traits, y.traits) * 0.4),
+            )
+            # Partial on purpose: casual contact eases loneliness without
+            # removing the reason to go looking for company.
+            x.needs.restore("social", 2.0)
 
 
 def _demo(days: int = 2) -> None:

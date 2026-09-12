@@ -114,8 +114,6 @@ class MemoryStream:
         # range and its noise outvotes a signal that actually discriminates.
         all_relevance = [cosine(query_vector, n.vector) for n in self.nodes]
         shortlist = sorted(range(len(self.nodes)), key=lambda i: -all_relevance[i])[: k * 3]
-        all_relevance = [cosine(query_vector, n.vector) for n in self.nodes]
-        shortlist = sorted(range(len(self.nodes)), key=lambda i: -all_relevance[i])[: k * 3]
 
         # Return fewer memories rather than worse ones. Relative to the best
         # match, not absolute — cosine scales differ per embedding model, and a

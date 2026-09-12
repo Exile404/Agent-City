@@ -8,6 +8,7 @@ from app.agents.actions import RESTORES, Action
 from app.config import CONFIG
 from app.cognition.memory import MemoryStream
 from app.cognition.prompts import PlanStep
+from app.agents.relationships import Relationship
 
 SKILLS = ("programming", "analysis", "communication", "design", "management")
 
@@ -71,6 +72,7 @@ class Agent:
     plan: list[PlanStep] = field(default_factory=list)
     #: Far in the past so every agent looks overdue on the first tick.
     last_plan_tick: int = -10_000
+    relationships: dict[str, Relationship] = field(default_factory=dict)
 
     @property
     def pos(self) -> tuple[int, int]:

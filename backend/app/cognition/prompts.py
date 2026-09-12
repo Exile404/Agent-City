@@ -7,6 +7,7 @@ drift apart the first time the vocabulary changes.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from app.agents.actions import ActionKind
@@ -144,3 +145,98 @@ def _minutes(value: object) -> int | None:
     if not (0 <= hours < 24 and 0 <= minutes < 60):
         return None
     return hours * 60 + minutes
+
+CONVERSATION_SYSTEM = (
+    "You write short, natural exchanges between two residents of a small city. "
+    "Answer only with JSON. Keep every line under twenty words. "
+    "People talk about what is actually on their minds — work, money, study, "
+    "food, each other — not about the weather. "
+    "Keep everything suitable for a general audience: no sexual remarks, "
+    "slurs, or crude language about anyone."
+)
+
+#: Whole-word match only — substring matching turns "class" and "assess" into
+#: false positives. A conversation tripping this is discarded entirely: the Tier
+#: 0 greeting has already happened, so nothing is lost except the words.
+_BLOCKED = re.compile(
+    r"\b(tits|boobs|ass|arse|dick|cock|pussy|fuck\w*|shit|bitch|whore|slut|"
+    r"horny|sexy|naked|rape)\b",
+    re.IGNORECASE,
+)
+
+
+def is_publishable(lines: list[tuple[str, str]]) -> bool:
+    """Whether an exchange is safe to put in a feed anyone might watch."""
+    return not any(_BLOCKED.search(says) for _, says in lines)
+
+
+def conversation(
+    *,
+    a_name: str,
+    a_traits: list[str],
+    a_memories: list[str],
+    b_name: str,
+    b_traits: list[str],
+    b_memories: list[str],
+    place: str,
+    doing: str,
+    relation: str,
+    clock: str,
+) -> str:
+    """Generate a whole exchange in one call.
+
+    One generation per conversation rather than one per turn: a six-turn dialogue
+    would cost six slots against a budget of 0.27 per tick.
+    """
+    a_recall = "; ".join(a_memories) or "nothing in particular"
+    b_recall = "; ".join(b_memories) or "nothing in particular"
+
+    return f"""{a_name} and {b_name} are both at {place}, {doing}. It is {clock}.
+To {a_name}, {b_name} is {relation}.
+
+{a_name} is {", ".join(a_traits)}. On their mind: {a_recall}
+{b_name} is {", ".join(b_traits)}. On their mind: {b_recall}
+
+Write what they say to each other — 2 to 4 short lines, alternating, starting
+with {a_name}. Then rate how the exchange went from -3 (hostile) to 3 (warm).
+
+Reply with JSON exactly like this:
+{{"lines": [{{"who": "{a_name}", "says": "..."}}, {{"who": "{b_name}", "says": "..."}}], "warmth": 1}}"""
+
+
+def parse_conversation(
+    data: dict | None, a_name: str, b_name: str
+) -> tuple[list[tuple[str, str]], int]:
+    """Return (lines, warmth). Empty lines mean the generation was unusable.
+
+    Never raises. As with plans, a bad reply degrades to nothing happening rather
+    than to an exception in the tick loop.
+    """
+    if not isinstance(data, dict):
+        return [], 0
+
+    lines: list[tuple[str, str]] = []
+    for entry in (data.get("lines") or [])[:6]:
+        if not isinstance(entry, dict):
+            continue
+        who = str(entry.get("who", "")).strip()
+        says = " ".join(str(entry.get("says", "")).split())[:200]
+        if not says:
+            continue
+        # Models drift between "Maya", "Maya Silva" and "A". Match on the first
+        # name and default to whoever did not speak last, which keeps the
+        # exchange alternating even when the label is wrong.
+        if who.split()[:1] == a_name.split()[:1]:
+            speaker = a_name
+        elif who.split()[:1] == b_name.split()[:1]:
+            speaker = b_name
+        else:
+            speaker = b_name if (lines and lines[-1][0] == a_name) else a_name
+        lines.append((speaker, says))
+
+    warmth = data.get("warmth", 0)
+    try:
+        warmth = int(float(warmth))
+    except (TypeError, ValueError):
+        warmth = 0
+    return lines, max(-3, min(3, warmth))

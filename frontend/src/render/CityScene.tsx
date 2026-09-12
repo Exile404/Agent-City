@@ -9,7 +9,7 @@
 import { Grid, Html, OrbitControls } from '@react-three/drei'
 import { Canvas, useFrame } from '@react-three/fiber'
 import { Bloom, EffectComposer } from '@react-three/postprocessing'
-import { memo, useEffect, useMemo, useRef } from 'react'
+import { memo, useEffect, useMemo, useRef, useSyncExternalStore } from 'react'
 import * as THREE from 'three'
 import type { Building, CityStore } from '../state/socket'
 import { ACTION_COLORS } from './colors'
@@ -354,11 +354,14 @@ function Ground({ store }: { store: CityStore }) {
 const Scene = memo(function Scene({
   store,
   onSelect,
+  buildings,
 }: {
   store: CityStore
   onSelect: (index: number) => void
+  /** Passed rather than read off `store`: see CityScene below. */
+  buildings: Building[]
 }) {
-  const { world, buildings, roster } = store
+  const { world, roster } = store
   const ox = world ? -world.width / 2 : 0
   const oz = world ? -world.height / 2 : 0
 
@@ -433,9 +436,18 @@ export default function CityScene({
   store: CityStore
   onSelect: (index: number) => void
 }) {
+  // Scene is memoised, and both `store` (a module singleton) and `onSelect` (a
+  // useCallback with no deps) are permanently stable references — so without a
+  // prop that actually changes, Scene renders once against an empty world and
+  // never again. Subscribing to the buildings array rather than the version
+  // counter keeps that to a single re-render when `hello` lands instead of one
+  // per tick: the canvas still reads positions straight from the store at 60fps
+  // without passing through React.
+  const buildings = useSyncExternalStore(store.subscribe, () => store.buildings)
+
   return (
     <Canvas camera={{ position: [0, 34, 44], fov: 45 }}>
-      <Scene store={store} onSelect={onSelect} />
+      <Scene store={store} onSelect={onSelect} buildings={buildings} />
     </Canvas>
   )
 }
