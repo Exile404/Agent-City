@@ -4,25 +4,27 @@ A living city of 50 LLM agents who study at university, interview for jobs, get
 hired, and work under a management hierarchy — running entirely on a single
 consumer GPU, with no cloud API.
 
-> **Status: Phase 2 complete.** Agents have a memory stream and plan their own
-> days on a local 7B/3B model, admitted through a cognition scheduler that
-> rations a measured GPU budget. The institutions that make it a *career*
-> simulation (Phases 4–6) are not built yet. The roadmap marks what exists.
+> **Status: Phase 3 complete.** Agents have a memory stream, plan their own days,
+> and talk to whoever they run into — all on a local 3B model, admitted through a
+> cognition scheduler that rations a measured GPU budget. The institutions that
+> make it a *career* simulation (Phases 4–6) are not built yet. The roadmap marks
+> what exists.
 
 ## The constraint that shapes everything
 
 Fifty agents that each "think" every tick would need 50 LLM inferences per
-second. A single RTX 5060 Ti delivers about four. Measured on the target
-hardware:
+second. A single RTX 5060 Ti delivers barely more than one. Measured on the
+target hardware:
 
-| Lane | Model | Throughput | Concurrent |
-|---|---|---|---|
-| Fast | `qwen2.5:3b` | 152 tok/s | 2.45 calls/sec @ 4 parallel |
-| Smart | `qwen2.5:7b-instruct-q4_K_M` | 78 tok/s | 1.34 calls/sec @ 2 parallel |
+| Lane | Model | Latency | Slots | Throughput |
+|---|---|---|---|---|
+| Fast — plans | `qwen2.5:3b` | ~2.4s | 2 | 0.83 calls/sec |
+| Smart — dialogue | `qwen2.5:3b` | ~1.5s | 1 | 0.67 calls/sec |
 
-That is ~3.8 LLM calls per second against a demand of ~540 calls per simulated
-day — roughly 98% saturation at 50 agents. The scarcity is the design problem,
-and every architectural decision here follows from it.
+Measured end to end that is **1.32 completed calls per second** — about 190 per
+simulated day against a demand of roughly 540. The city asks for three times what
+the card can deliver. The scarcity is the design problem, and every architectural
+decision here follows from it.
 
 Free API tiers were evaluated and rejected: Groq's free tier caps at 6,000
 tokens/min (~7 usable calls/min with realistic prompts) and Gemini Flash at
@@ -48,8 +50,8 @@ This keeps the city coherent, cheap, and replayable.
 | Tier | Runs on | Cost | Frequency |
 |---|---|---|---|
 | **0 — Reflex** | Pure Python | free | Every agent, every tick |
-| **1 — Fast** | `qwen2.5:3b` | ~4 concurrent | Next-action choices, short utterances |
-| **2 — Deliberate** | `qwen2.5:7b` | ~2 concurrent | Daily plans, dialogue, interviews, reflection |
+| **1 — Fast** | `qwen2.5:3b` | 2 slots | Daily plans |
+| **2 — Deliberate** | `qwen2.5:3b` | 1 slot | Conversations, interviews, reflection |
 
 Tier 0 is what makes the city look continuously alive: needs decay, path
 following, action execution, and critical-need overrides. No agent ever blocks
@@ -58,10 +60,11 @@ waiting on a model.
 The cognition scheduler admits Tier 1/2 requests by priority within a per-tick
 budget; anything that doesn't win a slot degrades to Tier 0 and re-asks next
 tick with a priority that has risen slightly. Measured over two simulated days
-with 50 agents: **2.15 plans per agent per day, 0 dropped as stale, 0 errors,
-and roughly a third of agents model-driven at any instant.** The remaining
-two-thirds running on Tier 0 is the design working, not a shortfall — the GPU
-affords about four inferences a second and reflexes carry everything between.
+with 50 agents: **2.5 plans and 3.1 conversations per agent per day, 0 dropped as
+stale, 0 failed, 0 errors** across a thousand generations. Most agents are on
+Tier 0 at any instant, and that is the design working rather than a shortfall —
+the GPU affords barely more than one inference a second and reflexes carry
+everything between.
 
 ## Roadmap
 
@@ -70,7 +73,7 @@ affords about four inferences a second and reflexes carry everything between.
 | 0 | World grid, A* pathing, needs, actions, tick loop | ✅ Done |
 | 1 | FastAPI + WebSocket, Three.js renderer, time controls | ✅ Done |
 | 2 | Memory stream, LLM client, tiered scheduler, daily plans | ✅ Done |
-| 3 | Co-location conversations, relationships, event feed | ⬜ |
+| 3 | Co-location conversations, relationships, event feed | ✅ Done |
 | 4 | University: courses, exams, skill growth, credentials | ⬜ |
 | 5 | Companies, job postings, LLM interviews, hiring | ⬜ |
 | 6 | Org hierarchy, task assignment, reviews, promotions | ⬜ |
@@ -80,6 +83,13 @@ affords about four inferences a second and reflexes carry everything between.
 
 Requires Python 3.11+, Node 20+, pnpm, and [Ollama](https://ollama.com)
 (Ollama is unused until Phase 2).
+
+Ollama must be allowed to serve more than one request at a time, or the lanes
+are a fiction — see the design note below:
+
+```bash
+OLLAMA_NUM_PARALLEL=2 ollama serve
+```
 
 ```bash
 cd backend
@@ -95,13 +105,13 @@ python -m app.sim.loop
 ```
 
 ```
-576 ticks (2 sim-days) in 0.10s -> 5,602 ticks/sec
+576 ticks (2 sim-days) in 0.14s -> 4,167 ticks/sec
 clock: D2 Wed 06:00
-doing now: {'travel': 23, 'sleep': 12, 'exercise': 6, 'socialize': 6, 'eat': 3}
-path cache: 76% hit (611/192)
+doing now: {'travel': 29, 'sleep': 8, 'exercise': 7, 'eat': 5, 'socialize': 1}
+path cache: 77% hit (587/178)
 ```
 
-Simulating 50 agents costs ~0.2 ms per tick — roughly 19 simulated days per real
+Simulating 50 agents costs ~0.24 ms per tick — roughly 14 simulated days per real
 second. The simulation is free; only thinking is expensive.
 
 To watch it live, run the server and the frontend in two terminals:
@@ -115,7 +125,9 @@ cd frontend && pnpm install && pnpm dev
 ```
 
 Then open `http://localhost:5173`. Drag to orbit, scroll to zoom, click any
-agent to inspect their needs, skills and current action.
+agent to inspect their needs, skills, current action, and who they know — each
+relationship showing how often they have met, how they feel about each other, and
+the last thing that was said.
 
 ## Architecture
 
@@ -123,7 +135,7 @@ agent to inspect their needs, skills and current action.
 backend/app/
   config.py        Every tuning knob: pacing, cost, scale
   sim/             70x50 grid, city layout, A* pathing, clock, tick loop
-  agents/          Agent state, needs, skills, action execution
+  agents/          Agent state, needs, skills, actions, relationships
   cognition/       Memory stream, LLM client, scheduler, prompts   (Phase 2)
   institutions/    University, companies, job market, hierarchy    (Phases 4-6)
   net/             FastAPI, WebSocket broadcast, control API
@@ -156,6 +168,46 @@ An admitted thought runs entirely off the tick path:
 The simulation never awaits a model. Requests are fire-and-forget, answers apply
 on whatever tick they land, and anything older than its staleness window is
 discarded rather than acted on.
+
+## How two agents talk
+
+Conversation is mostly free. Two agents in the same building acknowledge each
+other, feel slightly less alone, and drift together or apart according to
+temperament — pure Python, every tick, no model involved. Measured at **1.54
+encounters per tick** against a budget of **0.27 generated conversations**, so
+about one in five can afford words. The greeting is not a fallback; it is what
+happens to the overwhelming majority, and the city looks sociable because of it.
+
+Which encounter gets words is scored *before* the greeting, not after. `greet()`
+stamps `last_talked_tick` and increments `times_met` — the very facts the score
+reads — so the reverse order makes every pair look like acquaintances who just
+spoke. First meetings dominate at 6.0; known pairs score on time apart and
+strength of feeling. The gate sits at 2.0, in the valley of a bimodal
+distribution, leaving 0.61 candidates per tick against 0.27 slots. That
+oversupply is deliberate: refusing a candidate costs nothing, since it still gets
+the greeting, while an idle slot is GPU thrown away.
+
+Conversations bypass the plan scheduler entirely. A refused plan re-asks next
+tick at a higher priority; a refused encounter is simply gone, because the
+greeting has already put that pair on a three-hour cooldown. There is no queue to
+be fair about — only a choice of which of this tick's pairs is worth words.
+
+The whole exchange is one generation rather than one per turn, and the simulation
+decides what it changed: warmth moves affinity by at most a few points, so a
+single conversation can *start* a friendship and never manufacture one. Who ends
+up close stays mostly a matter of who keeps turning up. Affinity reaches +26 by
+day 6, with friendships forming and nothing forced.
+
+Each exchange is stored as a memory at importance 4.0, above an observation. That
+one decision is what makes conversations compound — the next one remembers the
+last through ordinary retrieval, with no extra plumbing anywhere. Agents visibly
+relay third-hand news:
+
+> **Diego Rahman:** Same, and Nadia mentioned you're a bit lost around here.
+>
+> **Rin Haddad:** Hey Hugo, seen Elias? He looks stressed.
+
+Nobody wrote a gossip system. It falls out of dialogue being a memory.
 
 ## The city
 
@@ -216,6 +268,39 @@ silently discarding an agent's earliest intentions as "already past".
 step at once burned a full-day plan in ninety minutes. Taking the earliest step
 still inside a two-hour grace window more than doubled how long a plan survives.
 
+**Both lanes run the same 3B model.** A 7B alongside it meant three resident
+models costing 3.5GB of *host* RAM — Ollama launches llama-server with
+`--no-mmap`, so weights are copied into system memory even when they sit entirely
+on the GPU. On a 15GiB machine that was enough for the kernel OOM killer to take
+the desktop session down. The lane split survives as a policy reservation,
+holding a slot for dialogue so planning cannot starve it, rather than a boundary
+between two models.
+
+**Ollama serves one request at a time unless told otherwise.** It launches
+llama-server with `-np 1` by default, so surplus requests queue *inside* Ollama
+and expire against the staleness window having never run — measured at 15 of 60
+plan requests dropped unserved. `OLLAMA_NUM_PARALLEL=2` takes that to zero. Slots
+are not free either: at 4, llama-server held 4.5GB of host RAM for a model
+occupying 2.4GB of VRAM, because each slot carries its own KV cache.
+
+**An unusable conversation is discarded whole, never filtered.** Removing one
+offending line leaves a reply to something nobody said. The greeting has already
+happened by then, so both agents still met and still felt less alone — nothing in
+the simulation is left half-applied when a generation is thrown away.
+
+**The event feed is a cursor, not a filter.** Selecting events stamped with the
+current tick silently dropped everything that completes asynchronously: a plan or
+a conversation lands several ticks after its frame has gone out, so the feed only
+ever showed events raised inside `sim.tick()`. A monotonic counter and a
+high-water mark per broadcast fixed it — and the deque is capped, so its length
+stops being a usable cursor the moment it fills.
+
+**Staleness is counted in ticks, so every wait on it must be too.** A fixed
+number of real seconds is wrong in both directions: at 8x the window expires in
+2.25s while the waiter sits for 23s, pinning both conversation participants for a
+simulated day after their request was already dropped; at 0.5x it times out on
+requests that were about to land.
+
 **Density beat vehicles.** Journeys averaged 42 tiles — 1.8 sim-hours on foot —
 so cars were added to make a large map affordable. They looked wrong and solved
 the wrong problem: the real cause was one gym and two cafes serving the entire
@@ -229,6 +314,18 @@ top, which is both cheaper and the look the scene was after.
 **Occupancy is the lighting.** Building glow scales with how many agents are
 inside, so simulation state *is* the visual effect — an office brightens as
 people arrive and goes dark when they leave.
+
+**Which means a paused city is an unlit city.** Occupancy is derived from agent
+positions, and the opening `hello` carries the roster but not positions — so a
+client connecting while the sim was paused saw a correctly-built, completely
+black city until someone pressed play. One tick frame is now sent on connect,
+cursored so no event backlog replays into a fresh feed.
+
+**8x delivers about 4x.** The tick loop asks for 62ms between ticks but the body
+costs ~70ms, because asyncio is single-threaded and the loop shares it with eight
+outstanding thoughts and two conversations doing embeds and HTTP. Measured 7.4
+ticks/sec at 8x against 1.9 at 1x. The speed control is honest to about 4x and
+saturates past it.
 
 **Traffic lights would have been a second project.** Making them real means
 occupancy-aware pathfinding, which invalidates the A* cache every tick and turns
