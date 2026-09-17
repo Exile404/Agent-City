@@ -74,7 +74,7 @@ everything between.
 | 1 | FastAPI + WebSocket, Three.js renderer, time controls | ✅ Done |
 | 2 | Memory stream, LLM client, tiered scheduler, daily plans | ✅ Done |
 | 3 | Co-location conversations, relationships, event feed | ✅ Done |
-| 4 | University: courses, exams, skill growth, credentials | ⬜ |
+| 4 | University: courses, exams, skill growth, credentials | ✅ Done |
 | 5 | Companies, job postings, LLM interviews, hiring | ⬜ |
 | 6 | Org hierarchy, task assignment, reviews, promotions | ⬜ |
 | 7 | Reflection, deterministic replay, metrics dashboard | ⬜ |
@@ -117,8 +117,12 @@ second. The simulation is free; only thinking is expensive.
 To watch it live, run the server and the frontend in two terminals:
 
 ```bash
-cd backend && uvicorn app.net.server:app --reload --port 8000
+cd backend && uvicorn app.net.server:app --port 8000
 ```
+
+Not `--reload`: uvicorn watches the working directory, and any `.py` file created,
+moved or edited there restarts the app — and the city with it, from tick 0,
+silently. `AC_TERM_DAYS=4` shortens terms for measurement runs; the default is 14.
 
 ```bash
 cd frontend && pnpm install && pnpm dev
@@ -127,7 +131,8 @@ cd frontend && pnpm install && pnpm dev
 Then open `http://localhost:5173`. Drag to orbit, scroll to zoom, click any
 agent to inspect their needs, skills, current action, and who they know — each
 relationship showing how often they have met, how they feel about each other, and
-the last thing that was said.
+the last thing that was said. Students also show their course, attendance,
+credentials, and their last few exam papers.
 
 ## Architecture
 
@@ -208,6 +213,74 @@ relay third-hand news:
 > **Rin Haddad:** Hey Hugo, seen Elias? He looks stressed.
 
 Nobody wrote a gossip system. It falls out of dialogue being a memory.
+
+## How a student learns
+
+Fifteen agents start enrolled — the `initially_students` fraction that had been
+dead config since Phase 0. Six courses across two campuses, four sessions a week
+each, fourteen-day terms. A timetable is an external obligation rather than an
+appetite, so it is its own layer in `_choose_action`: above needs, below a
+critical one. An agent about to collapse from hunger does not keep a study
+appointment.
+
+Getting them into the room took four measured passes. The timetable alone gave
+**0.21** attendance, and the breakdown was exact: 43.8% asleep, 34.4% travelling,
+21.9% free — and 21.9% attended. A bedtime routine for students only (nobody
+unenrolled has a reason to prefer the night) took it to 0.56. Turning a journey
+around when class opens — the narrowest useful exception to actions having
+duration, since nobody is committed to the middle of a walk — took it to 1.00,
+which is degenerate: an exam has nothing to examine when everyone attended
+everything. Trait-driven skipping brought it back down. `diligence()` is not a
+dimension the agents were given; it falls out of the traits they already have, so
+a failed course traces back to who someone is rather than to a number invented
+for the university. Measured attendance sits near **0.70** against a predicted
+mean of 0.75.
+
+The register is signed by whoever sent the agent, not by the clock when they
+arrive. Journeys run a median 65 sim-minutes against a 60-minute join window, so
+checking the timetable on arrival marked almost everyone absent — attendance fell
+to 0.01 and the city stopped graduating. Skill grows from any study at the
+campus; only a session the timetable dispatched can sign the register, which is
+what stops the plan layer forging it.
+
+Exams are one generation. The model writes the question, the student's answer, a
+mark and an examiner's comment, anchored to the mark the simulation has already
+worked out from skill and attendance — its job is to write an exchange that reads
+like that number, not to invent an outcome. The answers are calibrated without
+being told how:
+
+> **Applied Programming** — *Write a simple function that takes two numbers and
+> returns their product.*
+>
+> I made a mistake I tried to multiply the numbers but I wrote it as an addition.
+> So, if you give me two numbers, like 4 and 5, I would write 9 instead of 20.
+
+> **Statistical Methods** — *Calculate the mean of 5, 10, 15, 20, 25.*
+>
+> To find the mean I add all the numbers and then divide by how many numbers
+> there are. So, it's (5+10+15+20+25) / 5 = 45 / 5 = 9.
+
+Nobody asked for arithmetic errors. A student who sets the method up correctly
+and botches the addition is what a weak paper looks like.
+
+Thirty of thirty papers are model-graded, with zero timeouts and zero unusable
+replies. The pass mark was read off the measured distribution rather than chosen:
+**36** puts 47% of first attempts through and 72% within the two the design
+allows, and it sits in a flat stretch of the curve, so a run that comes out
+slightly differently moves the rate by a few points rather than twenty. Samir
+Iyer failed Project Management with 14 having attended none of three sessions,
+then passed the retake with 57 having attended both. That arc is in his
+transcript; nobody wrote it.
+
+Money moves too. Rent falls on everyone at midnight, tuition on students, a
+stipend to the unemployed, and a meal costs the moment it starts. Nobody earns
+yet — that is Phase 5's wage — so balances go negative and running out of money
+is a milestone, at the same importance as a result. Measured at day 8: students
+had spent 762 against the employed's 622, and every part of the gap is
+accounted for — the seed dealt the fifteen students a poorer hand at spawn,
+tuition outran the stipend by 40, and a student eats about one meal a day more
+than anyone else, because the daytime-nap guard sends them to the cafe when
+hunger is merely the lowest thing left.
 
 ## The city
 
@@ -339,6 +412,72 @@ body rises once per step, not once per cycle.
 **`sorted()` before shuffling names is load-bearing.** Python randomizes string
 hashing per process, so iterating a set of strings differs every run. Without
 the sort, the seed is a lie and replay is impossible.
+
+**Two deadlines were racing, and the shorter always won.** The grace timer that
+marks a paper when nobody answers was 36 ticks; the wait for a reply was 36 ticks
+*plus five seconds*. The simulation marked every paper before the model could
+answer and the reply was discarded on arrival — invisibly, because the counter
+only saw unusable replies, not stolen ones. Measured, 14 of 15. The Hub now flags
+a paper in flight and the grace timer stands down while it is on, so the deadline
+lives in exactly one place.
+
+**Staleness is a freshness policy, and not everything perishes at the same
+rate.** A chat is about two people standing in a cafe *now*; fifteen ticks later
+they have walked out. An exam is about a term that has already ended. Sharing one
+window lost a quarter of all papers to timeouts; exams carry four times a chat's.
+
+**Every sentence added to the exam prompt cost a JSON key.** `format: "json"`
+guarantees the reply parses, not what it contains, and a 3B spends its
+instruction budget on the prose and drops `mark` off the end of the object. Leak
+suppression and JSON completeness competed for the same budget across four runs
+— 2–5 unusable papers became 7, then 11, then 17. A JSON Schema with `required`
+took it to zero by construction and freed the prompt for the constraints that
+were losing.
+
+**A band narrower than the examiner's bias *is* the examiner.** The model marks
+about ten points below `baseline_score`. Clamping to ±15 pulled most papers to
+exactly `expected − 15`: sixteen of thirty marks landed in a six-point window,
+and a two-point move in the pass mark swung the pass rate from 60% to 17%. At
+±30 the marks spread from 6 to 60 and the guard catches only the outliers it was
+meant for.
+
+**The simulation owns the number, so a missing mark keeps the paper.** A reply
+with a good question and answer and no mark used to be discarded whole — a
+deterministic grade *and* an empty transcript. The simulation now supplies the
+number and the script survives.
+
+**Intake is staggered backward, not forward.** Enrolled together at tick 0, every
+term fell due on the same tick forever. Backward, because `_mark_sessions` counts
+a session for anyone holding an enrollment — a forward offset would leave the
+last student accumulating sessions for a whole term before their own began.
+Bounded to half a term so nobody sits an exam having been offered no classes.
+
+**A lecture hall is an encounter factory.** Students had more encounters than
+non-students — 277 against 233 — because a timetable puts the same people in the
+same room four times a week. The university feeds Phase 3 without being told to.
+
+**A conflated counter hides the answer.** Three times over: timeouts lumped with
+bad replies, papers stolen by the grace timer lumped with unusable ones, a
+diagnostic that printed the head of a reply when the failure was in the tail.
+Each time the fix was two lines and one run, and each time it replaced a
+hypothesis with a fact.
+
+**Balances go negative.** Nobody earns until Phase 5, so any floor — can't eat,
+dropped for non-payment — would empty the university within a fortnight by
+construction rather than by anything a student did. Debt is a number, and the
+simulation owns it; what debt *means* is a question for the day a wage exists to
+climb out with.
+
+**"Employed" is a flag with no job behind it.** `initially_employed` had been
+dead config since Phase 0, and a stipend paid to everyone is a city printing
+money. Twenty-two agents are marked employed, get no stipend, and — with no wage
+yet — drain faster than the unemployed. Backwards, deliberately, until Phase 5.
+
+**Separate the draw from the behaviour before fixing either.** Students looked
+to be overspending by 355 at day 8, which read as three extra meals a day. Spawn
+is deterministic, so a headless run gives every starting balance: 215 of the gap
+was the seed, 40 was tuition against stipend, and the behaviour was one meal, not
+three. The measurement cost one command and prevented a fix to the wrong thing.
 
 ## License
 
