@@ -240,3 +240,98 @@ def parse_conversation(
     except (TypeError, ValueError):
         warmth = 0
     return lines, max(-3, min(3, warmth))
+
+EXAM_SYSTEM = (
+    "You set and mark exams at a city university. "
+    "Reply only with JSON, always carrying all four keys: question, answer, "
+    "mark, comment. "
+    "The answer is the student's own script — first person, their words, and "
+    "nothing but what they wrote on the paper. "
+    "Write it the way someone of their stated ability actually would — a weak or "
+    "absent student gives a visibly weak answer, and you mark it accordingly. "
+    "Keep everything suitable for a general audience."
+)
+
+#: Required shape for an exam reply. "format: json" alone lets the model close
+#: the object after two keys; the mark is the one the sim cannot recover.
+EXAM_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "question": {"type": "string"},
+        "answer": {"type": "string"},
+        "mark": {"type": "number"},
+        "comment": {"type": "string"},
+    },
+    "required": ["question", "answer", "mark", "comment"],
+}
+
+
+def exam(
+    *,
+    name: str,
+    course: str,
+    campus: str,
+    skill_name: str,
+    skill: float,
+    attended: int,
+    offered: int,
+    attempt: int,
+    expected: float,
+) -> str:
+    """One question, one answer, one mark, in a single generation.
+
+    The expected mark is handed to the model, not withheld: its job is to write
+    an exchange that reads like that number, not to invent an outcome. It sits
+    in the JSON example as well as the prose — a 3B copies the shape it is
+    shown far more reliably than it follows an instruction.
+    """
+    sat = "first sitting" if attempt == 1 else f"attempt {attempt}"
+    return f"""{name} is sitting the final exam for {course} at {campus} ({sat}).
+
+Their {skill_name} ability is {skill:.0f} out of 100.
+They attended {attended} of {offered} classes this term.
+A student in their position would typically score about {expected:.0f} out of 100.
+
+Write one exam question for this course, at most two sentences. It tests the
+subject itself — never the course, the exam, or the student's experience of
+either.
+
+Then write what {name} puts on the paper: their words, first person, as someone
+with {skill_name} at {skill:.0f}/100 who attended {attended} of {offered} classes
+would really write it. A few sentences at most, answering the question and
+nothing else: never the exam itself, never their attendance, never what they did
+or did not study. A weak student writes a weak answer to the question — they do
+not explain why it is weak.
+
+Then mark the answer out of 100 and add a one-line examiner's comment.
+
+Reply with JSON holding all four keys — question, answer, mark, comment —
+exactly like this:
+{{"question": "...", "answer": "I think ...", "mark": {expected:.0f}, "comment": "..."}}"""
+
+
+def _clip(text: object, limit: int) -> str:
+    """Collapse whitespace, then cut to length on a word boundary."""
+    s = " ".join(str(text).split())
+    if len(s) <= limit:
+        return s
+    head = s[:limit].rsplit(" ", 1)[0] or s[:limit]
+    return head + "\u2026"
+
+
+def parse_exam(data: dict | None) -> tuple[str, str, float | None, str]:
+    """Return (question, answer, mark, comment). A mark of None means unusable;
+    never raises, so a bad generation costs flavour rather than a result."""
+    if not isinstance(data, dict):
+        return "", "", None, ""
+    question = _clip(data.get("question", ""), 300)
+    answer = _clip(data.get("answer", ""), 400)
+    comment = _clip(data.get("comment", ""), 200)
+    try:
+        mark = float(data.get("mark"))
+    except (TypeError, ValueError):
+        return question, answer, None, comment
+    if not 0.0 <= mark <= 100.0:
+        return question, answer, None, comment
+    return question, answer, mark, comment
+

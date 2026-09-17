@@ -12,6 +12,8 @@ from random import Random
 from app.agents.actions import Action, ActionKind
 from app.agents.agent import SKILLS, Agent
 from app.config import CONFIG
+from app.institutions.university import Enrollment, choose_course
+from app.sim.clock import TICKS_PER_DAY
 from app.sim.world import BuildingKind, TileKind, World
 
 FIRST = (
@@ -74,4 +76,22 @@ def spawn_agents(world: World, rng: Random) -> list[Agent]:
                 ),
             )
         )
+
+    # Students from the head of the shuffled list, employed from the tail, so
+    # the two never overlap. Intake is staggered backward by up to half a term:
+    # enrolled together, every term would fall due on the same tick forever, and
+    # forward offsets would count sessions before a student's term had begun.
+    students = round(count * CONFIG.population.initially_students)
+    spread = CONFIG.university.term_days * TICKS_PER_DAY // 2
+    for i, agent in enumerate(agents[:students]):
+        course = choose_course(agent.skills, agent.credentials)
+        if course is not None:
+            agent.enrollment = Enrollment(
+                course_id=course.id,
+                started_tick=-(i * spread // max(1, students)),
+            )
+    # Nobody earns yet: "employed" currently means only "not on the stipend".
+    employed = round(count * CONFIG.population.initially_employed)
+    for agent in agents[count - employed:]:
+        agent.employed = True
     return agents

@@ -17,6 +17,8 @@ from app.cognition import prompts
 from app.cognition.embed import Embedder
 from app.cognition.llm import Lane, LLMClient, Request, parse_json
 from app.cognition.scheduler import Ask, Scheduler, plan_priority
+from app.institutions.university import Enrollment, baseline_score
+
 
 class Hub:
     def __init__(self) -> None:
@@ -43,6 +45,18 @@ class Hub:
         #: High-water mark for the event feed. One cursor, not one per client:
         #: every client receives the same broadcast.
         self._events_sent = 0
+        #: In-flight exam tasks. One paper at a time — they are rare and never
+        #: urgent, and should not contend with conversations for the smart lane.
+        self._exams: set[asyncio.Task] = set()
+        self.exams_done = 0
+        #: Reply arrived but was unusable (no mark, or unpublishable).
+        self.exams_fallback = 0
+        #: No reply inside the window. Kept separate: the two want opposite fixes.
+        self.exams_timeout = 0
+        #: Running (model mark - earned mark), before the clamp — whether the
+        #: anchor in the prompt is being honoured.
+        self.mark_delta_sum = 0.0
+        self.mark_delta_n = 0
 
     @property
     def _tick_seconds(self) -> float:
@@ -63,6 +77,7 @@ class Hub:
                 continue
             self.sim.tick()
             self._collect_chats()
+            self._collect_exams()
             self._collect_asks()
             self.scheduler.dispatch(self.sim.clock.tick, self._start_thought)
             msg = tick_message(self.sim, self._events_sent)
@@ -170,6 +185,8 @@ class Hub:
         kind: str,
         max_tokens: int,
         temperature: float = 0.7,
+        staleness: int | None = None,
+        schema: dict | None = None,
     ) -> str | None:
         landed = asyncio.Event()
         box: list[str] = []
@@ -189,6 +206,8 @@ class Hub:
                 want_json=True,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                staleness_ticks=staleness,
+                json_schema=schema,
                 on_done=receive,
             )
         )
@@ -203,7 +222,7 @@ class Hub:
         # chat participants in `_talking` for a sim-day after the request had
         # already been dropped. At 0.5x it ran the other way — 36 ticks take 36s,
         # and the fixed wait timed out on a request that was about to land.
-        window = CONFIG.llm.staleness_ticks * self._tick_seconds + 5.0
+        window = (staleness or CONFIG.llm.staleness_ticks) * self._tick_seconds + 5.0
         try:
             await asyncio.wait_for(landed.wait(), timeout=window)
         except asyncio.TimeoutError:
@@ -338,6 +357,103 @@ class Hub:
         self.chats_done += 1
         self.sim.log(f"{a.name} & {b.name} at {place} — {lines[0][1]}")
 
+    def _collect_exams(self) -> None:
+        """Send one pending paper to the model.
+
+        Bypasses the Scheduler like chats do. A paper that misses its chance is
+        not lost: the sim marks it once the grace window expires.
+        """
+        if self._exams or not self.sim.pending_exams:
+            return
+        self._start_exam(self.sim.pending_exams[0])
+
+    def _start_exam(self, agent: Agent) -> None:
+        e = agent.enrollment
+        if e is None:
+            return
+        # Stand the grace timer down while we work, so the two deadlines never race.
+        e.in_flight = True
+        task = asyncio.create_task(self._exam(agent, e))
+        self._exams.add(task)
+        task.add_done_callback(self._exams.discard)
+
+    async def _exam(self, agent: Agent, e: Enrollment) -> None:
+        """The model writes the paper and marks it; the sim decides what it means."""
+        # Read before the first await: sit_exam replaces the enrollment outright.
+        course, attempt = e.course, e.attempt
+        attended, offered = e.sessions_attended, e.sessions_offered
+        attendance = e.attendance
+        try:
+            skill = agent.skills[course.skill]
+            expected = baseline_score(skill, attendance, course.difficulty)
+
+            reply = await self._generate(
+                agent.id,
+                prompts.exam(
+                    name=agent.name,
+                    course=course.name,
+                    campus=self.sim.world.buildings[course.campus_id].name,
+                    skill_name=course.skill,
+                    skill=skill,
+                    attended=attended,
+                    offered=offered,
+                    attempt=attempt,
+                    expected=expected,
+                ),
+                lane=Lane.SMART,
+                system=prompts.EXAM_SYSTEM,
+                kind="exam",
+                max_tokens=480,
+                temperature=0.7,
+                staleness=CONFIG.university.exam_staleness_ticks,
+                schema=prompts.EXAM_SCHEMA,
+            )
+
+            # Already marked by the grace timer: marking again would award a
+            # second credential for one term.
+            if agent not in self.sim.pending_exams:
+                return
+
+            if reply is None:
+                self.exams_timeout += 1
+                self.sim.sit_exam(agent)
+                return
+
+            question, answer, mark, comment = prompts.parse_exam(parse_json(reply))
+            publishable = prompts.is_publishable([("q", question), ("a", answer)])
+            if mark is None or not publishable:
+                self.exams_fallback += 1
+                # The simulation owns the number: a missing mark is no reason
+                # to bin a paper the model wrote well. Grade it and keep the script.
+                self.sim.sit_exam(agent)
+                if publishable and question and answer:
+                    agent.memory.add(
+                        self.sim.clock.tick,
+                        "milestone",
+                        f"{course.name} exam — asked: {question} — I answered: {answer}",
+                    )
+                return
+
+            # Recorded raw, before the clamp inside sit_exam.
+            self.mark_delta_sum += mark - expected
+            self.mark_delta_n += 1
+
+            score, passed = self.sim.sit_exam(agent, mark)
+            self.exams_done += 1
+            if question and answer:
+                agent.memory.add(
+                    self.sim.clock.tick,
+                    "milestone",
+                    f"{course.name} exam — asked: {question} — I answered: {answer}",
+                )
+            if comment:
+                self.sim.log(f"{agent.name} — {course.name} examiner: {comment}")
+        except Exception:
+            self.think_errors += 1
+        finally:
+            # On a raise or a cancel this is what stops the student waiting forever.
+            e.in_flight = False
+
     async def broadcast(self, message: dict) -> None:
         # Gather failures first: a set cannot be mutated while iterating, and a
         # client vanishing mid-broadcast would otherwise kill the tick task.
@@ -401,6 +517,12 @@ def health() -> dict:
         "chatsDone": hub.chats_done,
         "chatsBlocked": hub.chats_blocked,
         "chatsInFlight": len(hub._chats),
+        "examsDone": hub.exams_done,
+        "examsFallback": hub.exams_fallback,
+        "examsTimeout": hub.exams_timeout,
+        "examMarkDelta": (
+            round(hub.mark_delta_sum / hub.mark_delta_n, 1) if hub.mark_delta_n else None
+        ),
     }
 
 

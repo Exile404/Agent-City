@@ -26,6 +26,18 @@ type AgentDetail = {
   needs: Record<string, number>
   skills: Record<string, number>
   money: number
+  employed: boolean
+  study: {
+    course: string
+    campus: string
+    attendance: number
+    attended: number
+    offered: number
+    attempt: number
+    awaitingExam: boolean
+  } | null
+  credentials: string[]
+  milestones: string[]
   relationships: {
     name: string
     affinity: number
@@ -190,10 +202,15 @@ export default function App() {
               </button>
             </Title>
             <div className="text-xs text-muted">
-              {detail.age} · {detail.traits.join(', ')}
+              {detail.age} · {detail.traits.join(', ')} ·{' '}
+              {detail.employed ? 'employed' : 'unemployed'}
             </div>
             <div className="text-xs text-muted">
-              {detail.home} · ${detail.money.toFixed(0)}
+              {detail.home} ·{' '}
+              {/* Same red as Bar under 20, so debt reads in the panel's own vocabulary. */}
+              <span style={{ color: detail.money < 0 ? 'hsl(0 62% 55%)' : undefined }}>
+                {detail.money < 0 ? '−' : ''}${Math.abs(detail.money).toFixed(0)}
+              </span>
             </div>
             <div
               className="mt-2 font-semibold"
@@ -211,6 +228,52 @@ export default function App() {
             {Object.entries(detail.skills).map(([k, v]) => (
               <Bar key={k} label={k} value={v} />
             ))}
+
+            {detail.study && (
+              <>
+                <Title>Studying</Title>
+                <div className="text-xs">
+                  {detail.study.course}
+                  {detail.study.attempt > 1 && (
+                    <span className="text-muted"> · attempt {detail.study.attempt}</span>
+                  )}
+                  {detail.study.awaitingExam && (
+                    <span className="text-muted"> · sitting exam</span>
+                  )}
+                </div>
+                {/* Bar is 0-100; attendance is a ratio. Its hue thresholds happen
+                    to read right here too: under half is amber, under a fifth red. */}
+                <Bar label="attendance" value={detail.study.attendance * 100} />
+                <div className="text-[11px] text-muted">
+                  {detail.study.attended} of {detail.study.offered} sessions
+                </div>
+              </>
+            )}
+
+            {detail.credentials?.length ? (
+              <>
+                <Title>Credentials</Title>
+                {detail.credentials.map((c) => (
+                  <div key={c} className="text-xs">{c}</div>
+                ))}
+              </>
+            ) : null}
+
+            {/* Newest term first. Each term lands as result-then-paper, so
+                reversing reads as the paper followed by its mark. */}
+            {detail.milestones?.length ? (
+              <>
+                <Title>Transcript</Title>
+                {detail.milestones.slice().reverse().map((m, i) => (
+                  <div
+                    key={i}
+                    className="border-b border-[#1e1e28] py-1 text-[11px] leading-snug text-muted"
+                  >
+                    {m}
+                  </div>
+                ))}
+              </>
+            ) : null}
 
             {/* Guarded on length: the inspector re-fetches every second, and an
                 agent who has met nobody returns [], which would otherwise flash

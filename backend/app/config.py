@@ -182,6 +182,24 @@ class CognitionConfig:
 
 
 @dataclass(frozen=True)
+class UniversityConfig:
+    #: Skill points a session grants at zero skill and difficulty 1.0. Two terms
+    #: are worth ~30 against a spawn spread of 5-60, so graduating changes where
+    #: someone stands.
+    session_gain: float = 6.0
+    #: Ticks a paper stays worth marking. Four times the chat window: a finished
+    #: term does not go stale, and a quarter of papers were timing out at 36.
+    exam_staleness_ticks: int = _env_int("AC_EXAM_STALENESS", 144)
+    #: How far a model's mark may sit from the one the simulation earned. Wider
+    #: than the model's ~10-point bias, so it guards outliers rather than grades.
+    exam_mark_band: float = _env_float("AC_EXAM_BAND", 30.0)
+    #: Sim-days in a term. Two weeks at four sessions a week is eight draws,
+    #: enough for attendance to resolve.
+    term_days: int = _env_int("AC_TERM_DAYS", 14)
+    max_attempts: int = 2
+
+
+@dataclass(frozen=True)
 class Config:
     world: WorldConfig = field(default_factory=WorldConfig)
     loop: LoopConfig = field(default_factory=LoopConfig)
@@ -191,6 +209,7 @@ class Config:
     needs: NeedsConfig = field(default_factory=NeedsConfig)
     economy: EconomyConfig = field(default_factory=EconomyConfig)
     cognition: CognitionConfig = field(default_factory=CognitionConfig)
+    university: UniversityConfig = field(default_factory=UniversityConfig)
     seed: int = _env_int("AC_SEED", 20260827)
 
 

@@ -39,8 +39,13 @@ class Request:
     system: str = ""
     #: Constrain sampling to valid JSON.
     want_json: bool = False
+    #: Constrain it to a shape, not merely to valid syntax.
+    json_schema: dict | None = None
     max_tokens: int = 220
     temperature: float = 0.8
+    #: Ticks this request stays worth answering; None takes the global default.
+    #: A chat perishes in minutes, an exam about a finished term does not.
+    staleness_ticks: int | None = None
 
 
 @dataclass
@@ -97,7 +102,8 @@ class LLMClient:
         task.add_done_callback(self._tasks.discard)
 
     def _stale(self, req: Request) -> bool:
-        return self._now_tick() - req.submitted_tick > CONFIG.llm.staleness_ticks
+        window = req.staleness_ticks or CONFIG.llm.staleness_ticks
+        return self._now_tick() - req.submitted_tick > window
 
     async def _run(self, req: Request) -> None:
         # Before queueing: a request that already waited out its window should
@@ -146,7 +152,7 @@ class LLMClient:
         if req.want_json:
             # Ollama constrains sampling to valid JSON, which removes nearly all
             # the parse-failure handling a 3B model would otherwise need.
-            body["format"] = "json"
+            body["format"] = req.json_schema or "json"
 
         response = await self._http.post("/api/generate", json=body)
         response.raise_for_status()

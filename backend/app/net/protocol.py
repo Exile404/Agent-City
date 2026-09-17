@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import base64
 
+from app.agents.agent import Agent
 from app.config import CONFIG
+from app.institutions.university import BY_ID
 from app.sim.layout import BLOCK, ROAD_WIDTH
 from app.sim.loop import Simulation
 
@@ -75,6 +77,20 @@ def tick_message(sim: Simulation, since_total: int) -> dict:
         "events": [text for _, text in list(sim.events)[-fresh:]] if fresh > 0 else [],
     }
 
+def _study(a: Agent) -> dict:
+    """The current term, as a transcript row."""
+    e = a.enrollment
+    return {
+        "course": e.course.name,
+        "campus": e.course.campus_id,
+        "attendance": round(e.attendance, 2),
+        "attended": e.sessions_attended,
+        "offered": e.sessions_offered,
+        "attempt": e.attempt,
+        "awaitingExam": e.awaiting_exam,
+    }
+
+
 def agent_detail(sim: Simulation, agent_id: str) -> dict | None:
     """Full state for the inspector panel. Fetched on click, never streamed."""
     for a in sim.agents:
@@ -90,6 +106,14 @@ def agent_detail(sim: Simulation, agent_id: str) -> dict | None:
                 "needs": {k: round(v, 1) for k, v in a.needs.as_dict().items()},
                 "skills": {k: round(v, 1) for k, v in a.skills.items()},
                 "money": round(a.money, 2),
+                "employed": a.employed,
+                # None for non-students: a blank, not a row of zeroes that reads
+                # like a failing one.
+                "study": _study(a) if a.enrollment is not None else None,
+                "credentials": [BY_ID[c].name for c in a.credentials if c in BY_ID],
+                # The moments an agent would actually tell you about, exam papers
+                # included.
+                "milestones": [n.text for n in a.memory.nodes if n.kind == "milestone"][-5:],
                 # Ordered by how strongly they feel rather than how warmly, so a
                 # rivalry is as visible as a friendship, and capped: an agent who
                 # has met forty people would push everything else off the panel.

@@ -9,6 +9,7 @@ from app.config import CONFIG
 from app.cognition.memory import MemoryStream
 from app.cognition.prompts import PlanStep
 from app.agents.relationships import Relationship
+from app.institutions.university import Enrollment
 
 SKILLS = ("programming", "analysis", "communication", "design", "management")
 
@@ -73,6 +74,13 @@ class Agent:
     #: Far in the past so every agent looks overdue on the first tick.
     last_plan_tick: int = -10_000
     relationships: dict[str, Relationship] = field(default_factory=dict)
+    #: None means not a student. One course at a time, which is what keeps exam
+    #: volume affordable once Phase 4's grading lands.
+    enrollment: Enrollment | None = None
+    credentials: list[str] = field(default_factory=list)
+    #: Phase 5 puts a job behind this. Until then it only decides who gets the
+    #: stipend — paid to everyone, it is a city printing money.
+    employed: bool = False
 
     @property
     def pos(self) -> tuple[int, int]:

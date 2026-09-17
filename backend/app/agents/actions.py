@@ -55,6 +55,10 @@ class Action:
     #: What to begin once TRAVEL arrives. Lets one field carry the intent
     #: through the journey, instead of a separate "why am I walking" state.
     then: Action | None = None
+    #: Set only when the timetable dispatched this. The register is signed by
+    #: whoever sent the agent, not by the clock when they arrive — journeys run
+    #: longer than the join window.
+    for_class: bool = False
 
     def is_done(self, tick: int) -> bool:
         if self.kind is ActionKind.TRAVEL:
