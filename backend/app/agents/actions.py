@@ -18,6 +18,9 @@ class ActionKind(str, Enum):
     EAT = "eat"
     STUDY = "study"
     WORK = "work"
+    #: Sim-dispatched only. Deliberately absent from prompts.PLANNABLE — an
+    #: agent does not decide to be interviewed, they go and get interviewed.
+    INTERVIEW = "interview"
     SOCIALIZE = "socialize"
     EXERCISE = "exercise"
 
@@ -38,6 +41,7 @@ DURATION_MINUTES: dict[ActionKind, int] = {
     ActionKind.EAT: 30,
     ActionKind.STUDY: 120,
     ActionKind.WORK: 240,
+    ActionKind.INTERVIEW: 60,
     ActionKind.SOCIALIZE: 60,
     ActionKind.EXERCISE: 60,
 }
@@ -59,6 +63,9 @@ class Action:
     #: whoever sent the agent, not by the clock when they arrive — journeys run
     #: longer than the join window.
     for_class: bool = False
+    #: Set only when the roster dispatched this. Same rule as the register:
+    #: wandering into an office on a whim is not a shift, and is not paid.
+    for_shift: bool = False
 
     def is_done(self, tick: int) -> bool:
         if self.kind is ActionKind.TRAVEL:

@@ -36,6 +36,16 @@ type AgentDetail = {
     attempt: number
     awaitingExam: boolean
   } | null
+  work: {
+    role: string
+    employer: string
+    skill: string
+    wage: number
+    attendance: number
+    attended: number
+    offered: number
+  } | null
+  applying: { role: string; employer: string } | null
   credentials: string[]
   milestones: string[]
   relationships: {
@@ -246,6 +256,40 @@ export default function App() {
                 <Bar label="attendance" value={detail.study.attendance * 100} />
                 <div className="text-[11px] text-muted">
                   {detail.study.attended} of {detail.study.offered} sessions
+                </div>
+              </>
+            )}
+
+            {detail.work && (
+              <>
+                <Title>Work</Title>
+                <div className="text-xs">
+                  {detail.work.role}
+                  <span className="text-muted"> · {detail.work.employer}</span>
+                </div>
+                <div className="text-[11px] text-muted">
+                  ${detail.work.wage} a shift · {detail.work.skill}
+                </div>
+                {/* Only once the roster has called a shift: before that
+                    attendance is 1.0 by definition, and a full green bar on
+                    a first-day hire reads as a record they have not earned. */}
+                {detail.work.offered > 0 && (
+                  <>
+                    <Bar label="attendance" value={detail.work.attendance * 100} />
+                    <div className="text-[11px] text-muted">
+                      turned up for {detail.work.attended} of {detail.work.offered} shifts
+                    </div>
+                  </>
+                )}
+              </>
+            )}
+
+            {detail.applying && (
+              <>
+                <Title>Applying</Title>
+                <div className="text-xs">
+                  {detail.applying.role}
+                  <span className="text-muted"> · {detail.applying.employer}</span>
                 </div>
               </>
             )}

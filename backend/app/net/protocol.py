@@ -91,6 +91,20 @@ def _study(a: Agent) -> dict:
     }
 
 
+def _work(sim: Simulation, a: Agent) -> dict:
+    """The current job, as a payroll row."""
+    j = a.job
+    return {
+        "role": j.role.title,
+        "employer": sim.world.buildings[j.employer_id].name,
+        "skill": j.role.skill,
+        "wage": round(j.role.wage),
+        "attendance": round(j.attendance, 2),
+        "attended": j.shifts_attended,
+        "offered": j.shifts_offered,
+    }
+
+
 def agent_detail(sim: Simulation, agent_id: str) -> dict | None:
     """Full state for the inspector panel. Fetched on click, never streamed."""
     for a in sim.agents:
@@ -107,6 +121,17 @@ def agent_detail(sim: Simulation, agent_id: str) -> dict | None:
                 "skills": {k: round(v, 1) for k, v in a.skills.items()},
                 "money": round(a.money, 2),
                 "employed": a.employed,
+                # None when out of work, like study: a blank rather than a row
+                # of zeroes that reads like a bad record.
+                "work": _work(sim, a) if a.job is not None else None,
+                "applying": (
+                    {
+                        "role": a.application.posting.role.title,
+                        "employer": a.application.posting.employer_name,
+                    }
+                    if a.application is not None
+                    else None
+                ),
                 # None for non-students: a blank, not a row of zeroes that reads
                 # like a failing one.
                 "study": _study(a) if a.enrollment is not None else None,

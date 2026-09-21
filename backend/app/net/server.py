@@ -17,6 +17,8 @@ from app.cognition import prompts
 from app.cognition.embed import Embedder
 from app.cognition.llm import Lane, LLMClient, Request, parse_json
 from app.cognition.scheduler import Ask, Scheduler, plan_priority
+from app.institutions.companies import Application, standing
+from app.institutions.university import BY_ID as COURSES
 from app.institutions.university import Enrollment, baseline_score
 
 
@@ -57,6 +59,17 @@ class Hub:
         #: anchor in the prompt is being honoured.
         self.mark_delta_sum = 0.0
         self.mark_delta_n = 0
+        #: In-flight interviews. One at a time, like exams — a candidate in a
+        #: lobby is not urgent, and the smart lane is shared with conversations.
+        self._interviews: set[asyncio.Task] = set()
+        self.interviews_done = 0
+        #: Reply arrived but carried no usable verdict, or was unpublishable.
+        self.interviews_fallback = 0
+        #: No reply inside the window. Kept separate: opposite fixes.
+        self.interviews_timeout = 0
+        #: Of the verdicts the model actually gave, how many were hires. The
+        #: number to watch: a model that hires everyone is not interviewing.
+        self.interviews_hired = 0
 
     @property
     def _tick_seconds(self) -> float:
@@ -78,6 +91,7 @@ class Hub:
             self.sim.tick()
             self._collect_chats()
             self._collect_exams()
+            self._collect_interviews()
             self._collect_asks()
             self.scheduler.dispatch(self.sim.clock.tick, self._start_thought)
             msg = tick_message(self.sim, self._events_sent)
@@ -454,6 +468,94 @@ class Hub:
             # On a raise or a cancel this is what stops the student waiting forever.
             e.in_flight = False
 
+    def _collect_interviews(self) -> None:
+        """Send one waiting candidate to the model.
+
+        Bypasses the Scheduler like exams do. A candidate who misses their
+        chance is not lost: the sim decides once the grace window expires.
+        """
+        if self._interviews or not self.sim.pending_interviews:
+            return
+        self._start_interview(self.sim.pending_interviews[0])
+
+    def _start_interview(self, agent: Agent) -> None:
+        app = agent.application
+        if app is None:
+            return
+        # Stand the grace timer down while we work, so the deadlines never race.
+        app.in_flight = True
+        task = asyncio.create_task(self._interview(agent, app))
+        self._interviews.add(task)
+        task.add_done_callback(self._interviews.discard)
+
+    async def _interview(self, agent: Agent, app: Application) -> None:
+        """The model runs the interview and decides; the sim owns the seat."""
+        # Read before the first await: hire_or_reject clears the application.
+        posting, role = app.posting, app.posting.role
+        try:
+            reply = await self._generate(
+                agent.id,
+                prompts.interview(
+                    name=agent.name,
+                    traits=agent.traits,
+                    role=role.title,
+                    employer=posting.employer_name,
+                    skill_name=role.skill,
+                    skill=agent.skills.get(role.skill, 0.0),
+                    requires=role.requires,
+                    standing=standing(agent.skills, agent.credentials, role),
+                    credentials=[
+                        COURSES[c].name for c in agent.credentials if c in COURSES
+                    ],
+                ),
+                lane=Lane.SMART,
+                system=prompts.INTERVIEW_SYSTEM,
+                kind="interview",
+                max_tokens=420,
+                temperature=0.7,
+                staleness=CONFIG.work.interview_staleness_ticks,
+                schema=prompts.INTERVIEW_SCHEMA,
+            )
+
+            # Already decided by the grace timer: deciding again would hand out
+            # a second seat for one application.
+            if agent.application is not app:
+                return
+
+            if reply is None:
+                self.interviews_timeout += 1
+                self.sim.hire_or_reject(agent)
+                return
+
+            question, answer, verdict, reason = prompts.parse_interview(parse_json(reply))
+            publishable = prompts.is_publishable([("q", question), ("a", answer)])
+
+            if verdict is None or not publishable:
+                # No usable verdict: the simulation falls back to its own. The
+                # transcript is still worth keeping if the model wrote one.
+                self.interviews_fallback += 1
+                self.sim.hire_or_reject(agent)
+            else:
+                self.sim.hire_or_reject(agent, verdict)
+                self.interviews_done += 1
+                self.interviews_hired += int(verdict)
+
+            if publishable and question and answer:
+                agent.memory.add(
+                    self.sim.clock.tick,
+                    "milestone",
+                    f"{role.title} interview at {posting.employer_name}"
+                    f" — asked: {question} — I said: {answer}",
+                )
+            if publishable and reason:
+                self.sim.log(f"{agent.name} — {posting.employer_name}: {reason}")
+        except Exception:
+            self.think_errors += 1
+        finally:
+            # On a raise or a cancel this is what stops the candidate waiting
+            # in the lobby forever.
+            app.in_flight = False
+
     async def broadcast(self, message: dict) -> None:
         # Gather failures first: a set cannot be mutated while iterating, and a
         # client vanishing mid-broadcast would otherwise kill the tick task.
@@ -522,6 +624,14 @@ def health() -> dict:
         "examsTimeout": hub.exams_timeout,
         "examMarkDelta": (
             round(hub.mark_delta_sum / hub.mark_delta_n, 1) if hub.mark_delta_n else None
+        ),
+        "interviewsDone": hub.interviews_done,
+        "interviewsFallback": hub.interviews_fallback,
+        "interviewsTimeout": hub.interviews_timeout,
+        "interviewHireRate": (
+            round(hub.interviews_hired / hub.interviews_done, 2)
+            if hub.interviews_done
+            else None
         ),
     }
 

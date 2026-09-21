@@ -8,7 +8,7 @@ free, only thinking is expensive.
 from __future__ import annotations
 
 import time
-from collections import deque
+from collections import Counter, deque
 from random import Random
 
 from app.agents.actions import DURATION_MINUTES, Action, ActionKind
@@ -16,6 +16,23 @@ from app.agents.agent import Agent
 from app.agents.relationships import Relationship, conversation_interest, trait_rapport
 from app.cognition.prompts import PlanStep
 from app.config import CONFIG
+from app.institutions.companies import (
+    APPLY_COOLDOWN_TICKS,
+    FIRING_ATTENDANCE,
+    FIRING_GRACE_SHIFTS,
+    HIRE_MARK,
+    REJECTION_COOLDOWN_DAYS,
+    Application,
+    Job,
+    best_vacancy,
+    headcount,
+    interview_score,
+    shift_closes_now,
+    shift_now,
+    shift_starts_now,
+    shows_up,
+    vacancies,
+)
 from app.institutions.university import (
     BEDTIME_ENERGY,
     DAYTIME_NAP_FLOOR,
@@ -34,6 +51,7 @@ from app.sim.layout import build_city
 from app.sim.pathing import PathCache
 from app.sim.spawn import spawn_agents
 from app.sim.world import Building, BuildingKind, TileKind
+
 
 #: Need -> (what fixes it, where it happens). None means the agent's own home.
 NEED_REMEDY: dict[str, tuple[ActionKind, BuildingKind | None]] = {
@@ -69,15 +87,32 @@ class Simulation:
         #: (a, b, interest) for pairs that met this tick, scored before greeting.
         self.last_encounters: list[tuple[Agent, Agent, float]] = []
         self.pending_exams: list[Agent] = []
+        #: Candidates sitting in a lobby waiting on a verdict.
+        self.pending_interviews: list[Agent] = []
         #: Starts at day 0 so nobody pays rent on the morning they arrive.
         self._billed_day = self.clock.day
+        #: Shifts completed and paid since boot. Never resets.
+        self.shifts_worked = 0
+        #: Shifts the roster called since boot, worked or not. The denominator
+        #: for attendance, exactly as sessions_offered is for class.
+        self.shifts_offered = 0
+        #: What people were doing instead, when they missed a shift.
+        self.shifts_missed: Counter[str] = Counter()
+        #: Journeys actually turned around. Separates "never fires" from
+        #: "fires and does not help".
+        self.redirects = 0
+        self.hires = 0
+        self.rejections = 0
+        self.firings = 0
 
     def tick(self) -> None:
         self.clock.advance()
         # Order matters: offered sessions are stamped before anyone can attend
         # one, and a term that ran out is marked before its next session.
         self._mark_sessions()
+        self._mark_shifts()
         self._check_terms()
+        self._check_interviews()
         self._bill_day()
         hours = CONFIG.world.minutes_per_tick / 60.0
         for agent in self.agents:
@@ -90,7 +125,7 @@ class Simulation:
 
     def _step(self, agent: Agent, hours: float) -> None:
         agent.tick_needs(hours)
-        self._redirect_to_class(agent)
+        self._redirect(agent)
         action = agent.action
 
         if action.kind is ActionKind.TRAVEL:
@@ -101,6 +136,7 @@ class Simulation:
             if not action.path:
                 self._begin(agent, action.then or Action(ActionKind.IDLE))
         elif action.is_done(self.clock.tick):
+            self._pay_shift(agent, action)
             self._begin(agent, self._choose_action(agent))
 
     def _begin(self, agent: Agent, action: Action) -> None:
@@ -128,6 +164,12 @@ class Simulation:
             before = agent.money
             agent.money -= CONFIG.economy.meal_cost
             self._note_broke(agent, before)
+
+        if action.kind is ActionKind.INTERVIEW and agent.application is not None:
+            # The clock starts when they sit down, not when they set off.
+            agent.application.filed_tick = self.clock.tick
+            if agent not in self.pending_interviews:
+                self.pending_interviews.append(agent)
 
         # Credited on arrival: actions are never interrupted, so starting the
         # session is the same event as sitting it.
@@ -163,6 +205,14 @@ class Simulation:
         if session is not None:
             return session
 
+        shift = self._due_shift(agent)
+        if shift is not None:
+            return shift
+
+        applying = self._seek_work(agent)
+        if applying is not None:
+            return applying
+
         bed = self._bedtime(agent)
         if bed is not None:
             return bed
@@ -174,11 +224,11 @@ class Simulation:
                 return action
 
         need = agent.needs.lowest()[0]
-        # A student with energy to spare does not nap at ten in the morning;
-        # if energy is genuinely low the critical check already caught it.
+        # Someone with energy to spare does not nap at ten in the morning; if
+        # energy is genuinely low the critical check already caught it.
         if (
             need == "energy"
-            and agent.enrollment is not None
+            and agent.has_routine
             and not is_bedtime(self.clock.hour)
             and agent.needs.energy >= DAYTIME_NAP_FLOOR
         ):
@@ -207,38 +257,107 @@ class Simulation:
             return None
         return self._travel_to(agent, campus, ActionKind.STUDY, for_class=True)
 
-    def _redirect_to_class(self, agent: Agent) -> None:
-        """Turn a journey around when class opens.
+    def _due_shift(self, agent: Agent) -> Action | None:
+        """The shift this agent should be at right now, if any.
+
+        Two ways to miss one, and they mean different things: temperament
+        decides whether they set off at all, and a critical need can outrank
+        the ones they meant to make.
+        """
+        job = agent.job
+        if job is None:
+            return None
+        if not shift_now(job.role, self.clock.weekday, self.clock.minute_of_day):
+            return None
+        if not shows_up(agent.id, job.employer_id, self.clock.day, agent.traits):
+            return None
+        # Already on the clock: re-deciding would restart the shift and pay twice.
+        if agent.action.kind is ActionKind.WORK and agent.action.for_shift:
+            return None
+        employer = self.world.buildings.get(job.employer_id)
+        if employer is None:
+            return None
+        return self._travel_to(agent, employer, ActionKind.WORK, for_shift=True)
+
+    def _seek_work(self, agent: Agent) -> Action | None:
+        """An unemployed agent going after a job.
+
+        Also where someone who qualifies for nothing decides to go and fix
+        that. There are only two answers to being out of work — apply, or go
+        and become worth hiring — and this picks between them.
+        """
+        if agent.job is not None or agent.application is not None:
+            return None
+        if agent.enrollment is not None:
+            return None  # finish the term first
+        if self.clock.tick - agent.last_applied_tick < APPLY_COOLDOWN_TICKS:
+            return None
+
+        all_open = vacancies(self.world, headcount(a.job for a in self.agents))
+        if not all_open:
+            # Nobody is hiring. A degree does not conjure a vacancy, so they
+            # wait on the stipend rather than pay tuition to sit still.
+            return None
+
+        cooldown = REJECTION_COOLDOWN_DAYS * TICKS_PER_DAY
+        reachable = [
+            p
+            for p in all_open
+            if self.clock.tick - agent.rejected_by.get(p.employer_id, -10_000) >= cooldown
+        ]
+        posting = best_vacancy(agent.skills, agent.credentials, reachable)
+        if posting is None:
+            # There is work, so either they cannot do it yet or everywhere that
+            # would have them has turned them down lately. The university
+            # answers the first; only time answers the second.
+            if best_vacancy(agent.skills, agent.credentials, all_open) is None:
+                self._enroll(agent)
+            return None
+
+        employer = self.world.buildings.get(posting.employer_id)
+        if employer is None:
+            return None
+        agent.last_applied_tick = self.clock.tick
+        agent.application = Application(posting=posting)
+        return self._travel_to(agent, employer, ActionKind.INTERVIEW)
+
+    def _enroll(self, agent: Agent, prefer: str | None = None) -> None:
+        """Send someone to the university."""
+        course = choose_course(agent.skills, agent.credentials, prefer=prefer)
+        if course is None:
+            return
+        agent.enrollment = Enrollment(course_id=course.id, started_tick=self.clock.tick)
+        agent.memory.add(self.clock.tick, "milestone", f"Enrolled in {course.name}")
+        self.log(f"{agent.name} enrolled in {course.name}")
+
+    def _redirect(self, agent: Agent) -> None:
+        """Turn a journey around when a timetable calls.
 
         The one exception to "actions have duration": nobody is committed to
-        the middle of a walk. Journeys run longer than the join window, so
-        without this a third of missed sessions were agents already on foot.
+        the middle of a walk. Journeys outlast both join windows, and being
+        already on foot was the largest single cause of missed classes — and,
+        measured at nine of sixteen, of missed shifts too.
         """
-        if agent.enrollment is None or agent.action.kind is not ActionKind.TRAVEL:
+        if agent.action.kind is not ActionKind.TRAVEL:
             return
         # Redirecting a starving agent away from the cafe starts a spiral.
         if agent.needs.critical() is not None:
             return
-
-        course = agent.enrollment.course
-        if not session_now(course, self.clock.weekday, self.clock.minute_of_day):
-            return
-        if not self._will_attend(agent):
-            return
-
+        # A timetable already dispatched this walk; leave it alone. Also what
+        # stops the redirect firing again every tick once it has fired once.
         then = agent.action.then
-        if then is not None and then.kind is ActionKind.STUDY and then.target_id == course.campus_id:
-            return  # already on the way
+        if then is not None and (then.for_class or then.for_shift):
+            return
 
-        campus = self.world.buildings.get(course.campus_id)
-        if campus is None:
+        # Class before work: a term is finite, a shift comes round tomorrow.
+        # Nobody holds both yet — slice 2 is where that choice gets real.
+        due = self._due_session(agent) or self._due_shift(agent)
+        # Unreachable: leave the original journey alone rather than stranding
+        # the agent mid-errand.
+        if due is None or due.kind is ActionKind.IDLE:
             return
-        replacement = self._travel_to(agent, campus, ActionKind.STUDY, for_class=True)
-        # Unreachable campus: leave the original journey alone rather than
-        # stranding the agent mid-errand.
-        if replacement.kind is ActionKind.IDLE:
-            return
-        self._begin(agent, replacement)
+        self.redirects += 1
+        self._begin(agent, due)
 
     def _will_attend(self, agent: Agent) -> bool:
         """Whether temperament sends this agent to today's class."""
@@ -246,9 +365,10 @@ class Simulation:
         return e is not None and attends(agent.id, e.course_id, self.clock.day, agent.traits)
 
     def _bedtime(self, agent: Agent) -> Action | None:
-        """A student turning in for the night. Students only — a timetable is
-        what imposes a routine."""
-        if agent.enrollment is None or agent.action.kind is ActionKind.SLEEP:
+        """Anyone with somewhere to be tomorrow turning in for the night.
+        Left to drift, sleep wanders across the clock and eats whatever the
+        morning was supposed to hold."""
+        if not agent.has_routine or agent.action.kind is ActionKind.SLEEP:
             return None
         if not is_bedtime(self.clock.hour):
             return None
@@ -291,11 +411,23 @@ class Simulation:
         if target is None:
             return None
 
+        # A plan that says "work" means your own job. Without this an employed
+        # agent walks into whichever office is nearest and does a day unpaid.
+        on_shift = False
+        if step.kind is ActionKind.WORK and agent.job is not None:
+            target = self.world.buildings.get(agent.job.employer_id) or target
+            # Arriving inside the roster's own window is the shift, whoever
+            # thought of it. The window is the sim's, so nothing is forged.
+            on_shift = shift_now(
+                agent.job.role, self.clock.weekday, self.clock.minute_of_day
+            )
+
         agent.memory.add(
             self.clock.tick, "plan", f"Went to {target.name} to {step.kind.value}: {step.why}"
         )
 
-        return self._travel_to(agent, target, step.kind)
+        return self._travel_to(agent, target, step.kind, for_shift=on_shift)
+
 
     def _remedy(self, agent: Agent, need: str) -> Action:
         """Tier 0. Free, deterministic, and always has an answer."""
@@ -316,8 +448,11 @@ class Simulation:
         then_kind: ActionKind,
         *,
         for_class: bool = False,
+        for_shift: bool = False,
     ) -> Action:
-        arrive = Action(then_kind, target_id=building.id, for_class=for_class)
+        arrive = Action(
+            then_kind, target_id=building.id, for_class=for_class, for_shift=for_shift
+        )
         # Walk to the spot indoors, not the doorstep — snapping inside was a
         # visible teleport at the end of every journey.
         goal = self._interior_spot(building.id, agent) or building.door
@@ -408,6 +543,16 @@ class Simulation:
 
         if passed:
             agent.credentials.append(course.id)
+
+        # A term has ended. Work beats another term whatever the mark, because
+        # studying is what someone does when they cannot get hired, not a
+        # career. Checked on a failure as much as on a pass: otherwise a weak
+        # student enrols forever and never looks up, which had sixteen of them
+        # sinking at 88 a day past a vacancy they could have walked into.
+        open_seats = vacancies(self.world, headcount(a.job for a in self.agents))
+        if best_vacancy(agent.skills, agent.credentials, open_seats) is not None:
+            agent.enrollment = None
+        elif passed:
             nxt = choose_course(agent.skills, agent.credentials)
             agent.enrollment = (
                 Enrollment(course_id=nxt.id, started_tick=self.clock.tick) if nxt else None
@@ -428,7 +573,149 @@ class Simulation:
             )
         return score, passed
 
+    # --------------------------------------------------------------------- work
+
+    def _mark_shifts(self) -> None:
+        """Count what the roster called, and what people did instead.
+
+        Offered at the bell, missed when the window shuts — the two ends of the
+        same window, so a shift is counted once and judged once.
+        """
+        weekday, minute = self.clock.weekday, self.clock.minute_of_day
+        for agent in self.agents:
+            job = agent.job
+            if job is None:
+                continue
+            if shift_starts_now(job.role, weekday, minute):
+                self.shifts_offered += 1
+                job.shifts_offered += 1
+            if not shift_closes_now(job.role, weekday, minute):
+                continue
+            if self._on_shift(agent):
+                job.shifts_attended += 1
+                continue
+            urgent = "/urgent" if agent.needs.critical() else ""
+            self.shifts_missed[agent.action.kind.value + urgent] += 1
+            # Judged only on a day they failed to appear: nobody is dismissed
+            # on a morning they turned up for.
+            if job.shifts_offered >= FIRING_GRACE_SHIFTS and job.attendance < FIRING_ATTENDANCE:
+                self._fire(agent)
+
+    @staticmethod
+    def _on_shift(agent: Agent) -> bool:
+        """At work, or on the way there. Arriving late still counts — the
+        journey was dispatched inside the window even if the walk outlived it."""
+        action = agent.action
+        if action.kind is ActionKind.WORK and action.for_shift:
+            return True
+        return (
+            action.kind is ActionKind.TRAVEL
+            and action.then is not None
+            and action.then.for_shift
+        )
+
+    #: Ticks an application may wait for a model's verdict before the sim
+    #: decides it. Six hours — a candidate left sitting in a lobby overnight is
+    #: not a simulation of anything. Application.in_flight covers a slow model.
+    INTERVIEW_GRACE_TICKS = TICKS_PER_DAY // 4
+
+    def _check_interviews(self) -> None:
+        """Decide any application nobody has come for."""
+        for agent in list(self.pending_interviews):
+            app = agent.application
+            if app is None:
+                self.pending_interviews.remove(agent)
+            elif (
+                not app.in_flight
+                and self.clock.tick - app.filed_tick >= self.INTERVIEW_GRACE_TICKS
+            ):
+                self.hire_or_reject(agent)
+
+    def _fire(self, agent: Agent) -> None:
+        """Let someone go for chronic absence.
+
+        The seat reopens, which is what keeps the market a market. They keep
+        their skills and their credentials and go back to looking, with a gap
+        in the record and that employer closed to them for a while.
+        """
+        job = agent.job
+        employer = self.world.buildings[job.employer_id].name
+        agent.job = None
+        agent.rejected_by[job.employer_id] = self.clock.tick
+        agent.memory.add(
+            self.clock.tick,
+            "milestone",
+            f"Let go as {job.role.title} at {employer} — turned up for"
+            f" {job.shifts_attended} of {job.shifts_offered} shifts",
+        )
+        self.log(f"{agent.name} was let go from {employer}")
+        self.firings += 1
+
+    def hire_or_reject(self, agent: Agent, verdict: bool | None = None) -> bool:
+        """Record an interview result. verdict=None decides it deterministically.
+
+        The Hub passes the model's verdict when it has one — unclamped, because
+        an interview is a judgement and judgement is the model's half of the
+        bargain. Whether a seat is still there to take, and what a rejected
+        candidate does next, are numbers, and stay here.
+        """
+        app = agent.application
+        posting = app.posting
+        role = posting.role
+        earned = interview_score(agent.skills, agent.credentials, role)
+        if verdict is None:
+            verdict = earned >= HIRE_MARK
+
+        # Re-checked now rather than when they applied: somebody else may have
+        # taken the seat while this candidate was waiting.
+        taken = headcount(a.job for a in self.agents)
+        hired = verdict and taken[posting.key] < role.seats
+
+        if agent in self.pending_interviews:
+            self.pending_interviews.remove(agent)
+        agent.application = None
+
+        if hired:
+            agent.job = Job(posting.employer_id, role.id, started_tick=self.clock.tick)
+            agent.memory.add(
+                self.clock.tick,
+                "milestone",
+                f"Hired as {role.title} at {posting.employer_name}",
+            )
+            self.log(f"{agent.name} was hired as {role.title} at {posting.employer_name}")
+            self.hires += 1
+            return True
+
+        agent.rejected_by[posting.employer_id] = self.clock.tick
+        agent.memory.add(
+            self.clock.tick,
+            "milestone",
+            f"Turned down for {role.title} at {posting.employer_name} — {role.skill}",
+        )
+        self.log(f"{agent.name} was turned down at {posting.employer_name}")
+        self.rejections += 1
+        # If the numbers say they were never really ready, the way back is the
+        # university. If they were ready and were turned down anyway, they try
+        # somewhere else first.
+        if earned < HIRE_MARK:
+            self._enroll(agent, prefer=role.skill)
+        return False
+
     # -------------------------------------------------------------------- money
+
+    def _pay_shift(self, agent: Agent, action: Action) -> None:
+        """Wages land on a finished shift, not on the calendar.
+
+        Whoever dispatched the agent signs for it, exactly as with the class
+        register — so someone who skips work earns less without a single rule
+        being written about skipping work.
+        """
+        if not action.for_shift or agent.job is None:
+            return
+        if action.kind is not ActionKind.WORK or action.target_id != agent.job.employer_id:
+            return
+        agent.money += agent.job.role.wage
+        self.shifts_worked += 1
 
     def _bill_day(self) -> None:
         """Once a sim-day, at midnight: rent from everyone, tuition from

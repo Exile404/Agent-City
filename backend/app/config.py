@@ -200,6 +200,14 @@ class UniversityConfig:
 
 
 @dataclass(frozen=True)
+class WorkConfig:
+    #: Ticks an interview stays worth running. Shorter than an exam's: the
+    #: candidate is sitting in a lobby, and Simulation.INTERVIEW_GRACE_TICKS
+    #: decides it at 72 anyway.
+    interview_staleness_ticks: int = _env_int("AC_INTERVIEW_STALENESS", 60)
+
+
+@dataclass(frozen=True)
 class Config:
     world: WorldConfig = field(default_factory=WorldConfig)
     loop: LoopConfig = field(default_factory=LoopConfig)
@@ -210,6 +218,7 @@ class Config:
     economy: EconomyConfig = field(default_factory=EconomyConfig)
     cognition: CognitionConfig = field(default_factory=CognitionConfig)
     university: UniversityConfig = field(default_factory=UniversityConfig)
+    work: WorkConfig = field(default_factory=WorkConfig)
     seed: int = _env_int("AC_SEED", 20260827)
 
 

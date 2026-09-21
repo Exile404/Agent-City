@@ -75,7 +75,7 @@ everything between.
 | 2 | Memory stream, LLM client, tiered scheduler, daily plans | ✅ Done |
 | 3 | Co-location conversations, relationships, event feed | ✅ Done |
 | 4 | University: courses, exams, skill growth, credentials | ✅ Done |
-| 5 | Companies, job postings, LLM interviews, hiring | ⬜ |
+| 5 | Companies, job postings, LLM interviews, hiring | ✅ Done |
 | 6 | Org hierarchy, task assignment, reviews, promotions | ⬜ |
 | 7 | Reflection, deterministic replay, metrics dashboard | ⬜ |
 
@@ -132,7 +132,9 @@ Then open `http://localhost:5173`. Drag to orbit, scroll to zoom, click any
 agent to inspect their needs, skills, current action, and who they know — each
 relationship showing how often they have met, how they feel about each other, and
 the last thing that was said. Students also show their course, attendance,
-credentials, and their last few exam papers.
+credentials, and their last few exam papers. Anyone with a job shows the role,
+the employer, what it pays a shift, and how many shifts they have turned up
+for; anyone walking to an interview shows where they are going.
 
 ## Architecture
 
@@ -273,14 +275,99 @@ then passed the retake with 57 having attended both. That arc is in his
 transcript; nobody wrote it.
 
 Money moves too. Rent falls on everyone at midnight, tuition on students, a
-stipend to the unemployed, and a meal costs the moment it starts. Nobody earns
-yet — that is Phase 5's wage — so balances go negative and running out of money
-is a milestone, at the same importance as a result. Measured at day 8: students
+stipend to the unemployed, and a meal costs the moment it starts. Wages arrived
+with Phase 5, but they are paid on a finished shift and a student works none, so
+a term is a fortnight of outgoings against no income: balances go negative and
+running out of money is a milestone, at the same importance as a result. Measured at day 8: students
 had spent 762 against the employed's 622, and every part of the gap is
 accounted for — the seed dealt the fifteen students a poorer hand at spawn,
 tuition outran the stipend by 40, and a student eats about one meal a day more
 than anyone else, because the daytime-nap guard sends them to the cafe when
 hunger is merely the lowest thing left.
+
+## How someone gets a job
+
+Eleven employers carry forty-one seats across sixteen roles. Like the
+curriculum, the postings are fixed data — an advert reads the same on Tuesday as
+it did on Monday, and a wage is a number, so the simulation owns both. What the
+model owns is the interview.
+
+A role names the skill it draws on, the standing it wants at the door, the days
+and hour of its shift, and what it is worth per sim-day of living. The shift wage
+derives from that last figure rather than being set directly, so a six-day job is
+not secretly richer than a five-day one advertising the same money. Against a
+measured cost of living near 78 a day, a stall hand at Foundry Market clears it
+by nine and a control engineer at Kestrel Power Station by a hundred and twenty.
+The top of the market is out of reach at spawn by construction — nobody is dealt
+programming 55 — so the Product Lead seats stand visibly empty until the
+university produces someone who can fill them.
+
+The rule that makes an interview worth holding:
+
+> The simulation decides who gets into the room. The model decides what happens
+> in it.
+
+The door is deterministic. Standing is raw skill plus ten points for a credential
+in the subject, and below the posting's requirement a candidate is turned away at
+reception without a generation being spent. That is what makes rejection
+*reliable*: a model asked to judge everyone lets a weak candidate through on a
+good roll, and then nobody ever needs to go back and study. Above the bar the
+verdict is the model's and is **not clamped** — unlike the exam mark, which is
+held inside a band around the number the simulation already worked out.
+
+One generation writes the question, the candidate's answer at their stated
+ability, the verdict and a reason. Writing the answer is the mechanism: the model
+is never asked whether 47 out of 100 is good enough, it is asked to write what a
+47 says and then react to what it wrote.
+
+> **Junior Engineer, Solstice Media** — *Given a list of integers, find the two
+> numbers such that they add up to zero.*
+>
+> Sure, let's say we have an array like [-3, -1, 2, 0]. The pair that adds up to
+> zero would be (-3, 3).
+
+Three is not in that array. Sana Rahman was turned down for it and enrolled in
+Algorithms.
+
+**The first version rejected sixteen of eighteen candidates** — not on judgement
+but on framing. The prompt handed over *"the job needs programming of at least 30
+out of 100; theirs is 47 out of 100"*, and 47 out of 100 is a failing grade in
+almost every context a language model has read. The job needing 30 does not
+rescue it. Taking the raw scale out of the facts — *"asks for 30, theirs is 47,
+comfortably clear of what the job asks"* — and stating the one fact the prompt had
+been leaving out, that everyone who reaches the room has already cleared the bar,
+moved the hire rate from **0.11 to 0.60** with nothing else touched. The scale
+stays in the instruction that writes the answer, which is where it earns its keep.
+
+Getting people to their shifts repeated the university's lesson almost line for
+line. Employed agents had no bedtime — only students did — so their sleep drifted
+freely around the clock and an eight-hour block would land across a two-hour
+joining window. Attendance ran **64%**. Giving anyone with a routine a bedtime
+took it to **80%**, and the residue turned out to be mostly people already on foot
+to fix an urgent need, which the redirect deliberately refuses to interrupt. Work
+then got a temperament of its own: `reliability()` reads the same `DILIGENCE`
+table the university uses, with a far higher floor, because a job is not a
+lecture. Attendance settles near **68%**, and roughly a quarter of absence is now
+character rather than circumstance.
+
+Absence costs the job. Ten shifts of grace, then anyone below 0.6 is let go, the
+seat reopens, and they are back in the market with a gap in the record and that
+employer closed to them for three days. Over forty measured days: **39 hired, 29
+rejected, 24 let go**. Hugo Silva's transcript reads hired at the market,
+dismissed after turning up for three shifts of eleven, turned down at the
+hospital, enrolled in Technical Writing, hired at Vertex Systems.
+
+A rejection does different things to different people. If the numbers say someone
+was never really ready, they enrol in the subject they were turned down for —
+`choose_course` takes that skill as a preference, so an analysis rejection sends
+them to Statistical Methods rather than wherever breadth would have put them. If
+they were qualified and were turned down anyway, they try somewhere else. Lena
+Chen has been refused twice for roles wanting communication 25 while holding
+communication 40; she is not studying, she is still looking.
+
+At forty days, thirty-three of fifty hold jobs and their median balance climbs 26
+a day. Sixteen are at the university, training toward seats that are genuinely
+open and all want 35 or more.
 
 ## The city
 
@@ -465,13 +552,30 @@ hypothesis with a fact.
 **Balances go negative.** Nobody earns until Phase 5, so any floor — can't eat,
 dropped for non-payment — would empty the university within a fortnight by
 construction rather than by anything a student did. Debt is a number, and the
-simulation owns it; what debt *means* is a question for the day a wage exists to
-climb out with.
+simulation owns it; what debt *means* is still open, now that a wage exists to
+climb out with and thirty-three of fifty are climbing.
 
-**"Employed" is a flag with no job behind it.** `initially_employed` had been
-dead config since Phase 0, and a stipend paid to everyone is a city printing
-money. Twenty-two agents are marked employed, get no stipend, and — with no wage
-yet — drain faster than the unemployed. Backwards, deliberately, until Phase 5.
+**The exam mark is clamped; the interview verdict is not.** A mark is a number
+and the simulation owns numbers, so the model writes a paper that reads like the
+grade already earned. A hire is a judgement, and judgement is the half of the
+bargain the model was brought in for. The asymmetry is the design rule applied
+twice, not an inconsistency.
+
+**Work and class share one trait table.** `reliability()` and `diligence()` both
+read `DILIGENCE`, so a restless agent is recognisably the same person in a
+lecture hall and at a power station. Work gets a much higher base and a
+compressed trait weight — turning up for something that pays is not the same
+decision as turning up for something that does not.
+
+**Seats are scarcer than people.** Forty-one for fifty, weighted to the junior
+end. A market that clears leaves nobody looking, and the university then has
+nothing to be for. An earlier twenty-nine left twenty-one agents permanently
+locked out, which is the same failure from the other side.
+
+**A wage is paid on a finished shift, not on the calendar.** `Role.daily` is what
+the job is worth to live on; the shift wage is derived from it. Someone who skips
+work earns less without a single rule being written about skipping work — the
+same trick as the class register, one layer down.
 
 **Separate the draw from the behaviour before fixing either.** Students looked
 to be overspending by 355 at day 8, which read as three extra meals a day. Spawn

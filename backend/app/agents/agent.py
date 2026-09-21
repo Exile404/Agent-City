@@ -5,10 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from app.agents.actions import RESTORES, Action
-from app.config import CONFIG
+from app.agents.relationships import Relationship
 from app.cognition.memory import MemoryStream
 from app.cognition.prompts import PlanStep
-from app.agents.relationships import Relationship
+from app.config import CONFIG
+from app.institutions.companies import Application, Job
 from app.institutions.university import Enrollment
 
 SKILLS = ("programming", "analysis", "communication", "design", "management")
@@ -78,13 +79,30 @@ class Agent:
     #: volume affordable once Phase 4's grading lands.
     enrollment: Enrollment | None = None
     credentials: list[str] = field(default_factory=list)
-    #: Phase 5 puts a job behind this. Until then it only decides who gets the
-    #: stipend — paid to everyone, it is a city printing money.
-    employed: bool = False
+    #: The seat this agent holds, None while looking. Shifts, wages and the
+    #: stipend all key off it.
+    job: Job | None = None
+    #: Sitting an interview, or on the way to one.
+    application: Application | None = None
+    #: Employer id -> tick they were turned down there. Stops anyone hammering
+    #: the same door every morning.
+    rejected_by: dict[str, int] = field(default_factory=dict)
+    #: Far in the past so a new arrival may apply at once.
+    last_applied_tick: int = -10_000
 
     @property
     def pos(self) -> tuple[int, int]:
         return self.x, self.y
+
+    @property
+    def employed(self) -> bool:
+        return self.job is not None
+
+    @property
+    def has_routine(self) -> bool:
+        """Enrolled, employed, or both — someone the clock makes demands of.
+        A job imposes a morning exactly as a timetable does."""
+        return self.enrollment is not None or self.job is not None
 
     def move_to(self, tile: tuple[int, int]) -> None:
         self.x, self.y = tile

@@ -18,7 +18,7 @@ PLANNABLE: dict[str, tuple[str, ...]] = {
     "sleep": ("home",),
     "eat": ("cafe", "market"),
     "study": ("university", "library"),
-    "work": ("office", "hospital", "market", "power", "gas", "bank"),
+    "work": ("office", "hospital", "market", "power", "gas", "bank", "library"),
     "socialize": ("cafe", "park"),
     "exercise": ("gym", "park"),
 }
@@ -335,3 +335,108 @@ def parse_exam(data: dict | None) -> tuple[str, str, float | None, str]:
         return question, answer, None, comment
     return question, answer, mark, comment
 
+
+INTERVIEW_SYSTEM = (
+    "You run hiring interviews at a city employer. "
+    "Reply only with JSON, always carrying all four keys: question, answer, "
+    "verdict, reason. "
+    "The answer is the candidate's own words — first person, and nothing but "
+    "what they said in the room. "
+    "Write it the way someone of their stated ability actually would: a weak "
+    "candidate gives a visibly weak answer, and you turn them down for it. "
+    "Keep everything suitable for a general audience."
+)
+
+#: The verdict is an enum, so constrained decoding cannot produce "maybe" or a
+#: sentence. Without it a 3B writes "hire, if they improve" and the parse falls
+#: back to the simulation's own guess, which is the whole feature lost.
+INTERVIEW_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "question": {"type": "string"},
+        "answer": {"type": "string"},
+        "verdict": {"type": "string", "enum": ["hire", "reject"]},
+        "reason": {"type": "string"},
+    },
+    "required": ["question", "answer", "verdict", "reason"],
+}
+
+
+def interview(
+    *,
+    name: str,
+    traits: list[str],
+    role: str,
+    employer: str,
+    skill_name: str,
+    skill: float,
+    requires: float,
+    standing: float,
+    credentials: list[str],
+) -> str:
+    """One question, one answer, one verdict, in a single generation.
+
+    No expected outcome is handed over, unlike the exam: the simulation decided
+    who was worth interviewing, and the decision in the room is the model's.
+    What it gets is the facts — what the work needs, what the candidate has —
+    and an instruction to judge the answer rather than the numbers.
+    """
+    held = (
+        f"They hold: {', '.join(credentials)}."
+        if credentials
+        else "They have no formal qualification."
+    )
+    # Never "47 out of 100": that reads as a failing grade whatever the job
+    # asks for, and it turned the model into an examiner who rejected 16 of 18
+    # candidates the simulation had already found qualified. The raw scale
+    # still belongs in the answer instruction below, where it is what makes a
+    # weak candidate write a weak answer.
+    clear = (
+        "comfortably clear of what the job asks"
+        if standing - requires >= 15
+        else "above what the job asks"
+        if standing - requires >= 5
+        else "just clear of what the job asks"
+    )
+    return f"""{name} is interviewing for {role} at {employer}. They are {", ".join(traits)}.
+
+This job asks for {skill_name} of {requires:.0f}. {name}'s is {standing:.0f} —
+{clear}. {held}
+
+Everyone who gets this far already clears the bar on paper. What you are
+judging is the answer they give, not the file.
+
+Write one interview question for this job, at most two sentences. It asks them
+to do the work — a problem to solve, a judgement to make, a thing to explain.
+Never their experience, their background, their previous jobs, the company, or
+how they feel about any of it.
+
+Then write what {name} actually says: their words, first person, as someone
+with {skill_name} at {skill:.0f}/100 would really answer it. A few sentences at
+most, answering the question and nothing else — never the job, never their own
+qualifications, never their past employment, never why they want to work here.
+
+Then decide. "hire" if the answer shows they can do this work, "reject" if it
+does not. Judge the answer you have just written, not the numbers above. Add a
+one-line reason.
+
+Reply with JSON holding all four keys — question, answer, verdict, reason —
+exactly like one of these:
+{{"question": "...", "answer": "I would ...", "verdict": "hire", "reason": "..."}}
+{{"question": "...", "answer": "I am not sure ...", "verdict": "reject", "reason": "..."}}"""
+
+
+def parse_interview(data: dict | None) -> tuple[str, str, bool | None, str]:
+    """Return (question, answer, hired, reason). hired=None means unusable;
+    never raises, so a bad generation costs the transcript, not the hire."""
+    if not isinstance(data, dict):
+        return "", "", None, ""
+    question = _clip(data.get("question", ""), 300)
+    answer = _clip(data.get("answer", ""), 400)
+    reason = _clip(data.get("reason", ""), 200)
+    verdict = str(data.get("verdict", "")).strip().lower()
+    if verdict.startswith("hire"):
+        return question, answer, True, reason
+    if verdict.startswith("reject"):
+        return question, answer, False, reason
+    return question, answer, None, reason

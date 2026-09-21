@@ -171,7 +171,10 @@ def baseline_score(skill: float, attendance: float, difficulty: float) -> float:
 
 
 def choose_course(
-    skills: dict[str, float], credentials: list[str], avoid: str | None = None
+    skills: dict[str, float],
+    credentials: list[str],
+    avoid: str | None = None,
+    prefer: str | None = None,
 ) -> Course | None:
     """The next course worth enrolling in.
 
@@ -179,6 +182,9 @@ def choose_course(
     otherwise everyone piles into the hardest course of their best subject.
     Within the preferred set they pick by aptitude, and the stronger student
     takes the harder version.
+
+    `prefer` names a skill to study regardless of breadth — what someone does
+    after being turned down for wanting exactly that.
 
     Takes primitives rather than an Agent because agent.py imports this module.
     """
@@ -194,4 +200,8 @@ def choose_course(
         return same[0] if skills.get(top, 0.0) >= 35.0 else same[-1]
 
     available = [c for c in CURRICULUM if c.id not in passed and c.id != avoid]
+    if prefer is not None:
+        wanted = pick([c for c in available if c.skill == prefer])
+        if wanted is not None:
+            return wanted
     return pick([c for c in available if c.skill not in covered]) or pick(available)

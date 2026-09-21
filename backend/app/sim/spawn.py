@@ -8,13 +8,18 @@ does ever reproducing a bug.
 from __future__ import annotations
 
 from random import Random
-
+from collections import Counter
 from app.agents.actions import Action, ActionKind
 from app.agents.agent import SKILLS, Agent
 from app.config import CONFIG
 from app.institutions.university import Enrollment, choose_course
 from app.sim.clock import TICKS_PER_DAY
 from app.sim.world import BuildingKind, TileKind, World
+from app.agents.actions import Action, ActionKind
+from app.agents.agent import SKILLS, Agent
+from app.config import CONFIG
+from app.institutions.companies import Job, best_vacancy, vacancies
+from app.institutions.university import Enrollment, choose_course
 
 FIRST = (
     "Maya", "Ravi", "Nadia", "Omar", "Lena", "Tariq", "Ines", "Kofi", "Sana", "Diego",
@@ -91,7 +96,16 @@ def spawn_agents(world: World, rng: Random) -> list[Agent]:
                 started_tick=-(i * spread // max(1, students)),
             )
     # Nobody earns yet: "employed" currently means only "not on the stipend".
-    employed = round(count * CONFIG.population.initially_employed)
-    for agent in agents[count - employed:]:
-        agent.employed = True
+    # Jobs go to the tail of the list, and only jobs people can actually do:
+    # the best-paid vacancy whose door they clear. Everyone reaches for the top
+    # first, so what stays open is the work nobody is qualified for yet — which
+    # is what gives a graduate somewhere to go.
+    hires = round(count * CONFIG.population.initially_employed)
+    taken: Counter[tuple[str, str]] = Counter()
+    for agent in agents[count - hires:]:
+        posting = best_vacancy(agent.skills, agent.credentials, vacancies(world, taken))
+        if posting is None:
+            continue  # qualified for nothing; starts out looking
+        agent.job = Job(employer_id=posting.employer_id, role_id=posting.role.id)
+        taken[posting.key] += 1
     return agents
