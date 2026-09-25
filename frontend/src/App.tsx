@@ -44,6 +44,16 @@ type AgentDetail = {
     attendance: number
     attended: number
     offered: number
+    manager: { name: string; role: string } | null
+    top: boolean
+    reports: string[]
+    form: number | null
+    tasks: { title: string; quality: number; tired: boolean }[]
+    review: { verdict: string; by: string; comment: string } | null
+    reviewDue: boolean
+    seconded: boolean
+    ready: boolean
+    warnings: number
   } | null
   applying: { role: string; employer: string } | null
   credentials: string[]
@@ -67,6 +77,12 @@ function Title({ children }: { children: ReactNode }) {
       {children}
     </div>
   )
+}
+
+const VERDICT_HUE: Record<string, string> = {
+  promote: 'hsl(145 62% 50%)',
+  keep: 'inherit',
+  warn: 'hsl(0 62% 50%)',
 }
 
 function Bar({ label, value }: { label: string; value: number }) {
@@ -137,12 +153,15 @@ export default function App() {
     return () => cityStore.disconnect()
   }, [])
 
+  // Keyed on the person, not the slot: when someone retires, a newcomer takes
+  // their index in the roster, and the panel should switch to them.
+  const selectedId = selected === null ? null : (cityStore.roster[selected]?.id ?? null)
+
   // Inspector detail is pulled, not streamed: full needs, skills and money for
   // fifty agents every tick would be bandwidth for a panel usually closed.
   useEffect(() => {
-    if (selected === null) return
-    const id = cityStore.roster[selected]?.id
-    if (!id) return
+    if (selectedId === null) return
+    const id = selectedId
 
     let cancelled = false
     const load = () =>
@@ -159,7 +178,7 @@ export default function App() {
       cancelled = true
       clearInterval(timer)
     }
-  }, [selected])
+  }, [selectedId])
 
   const changeSpeed = useCallback((v: number) => {
     setSpeed(v)
@@ -270,6 +289,18 @@ export default function App() {
                 <div className="text-[11px] text-muted">
                   ${detail.work.wage} a shift · {detail.work.skill}
                 </div>
+                <div className="text-[11px] text-muted">
+                  {detail.work.manager
+                    ? `reports to ${detail.work.manager.name} · ${detail.work.manager.role}`
+                    : detail.work.top
+                      ? 'top of the ladder'
+                      : 'nobody above — those seats are empty'}
+                </div>
+                {detail.work.reports.length > 0 && (
+                  <div className="text-[11px] text-muted">
+                    manages {detail.work.reports.join(', ')}
+                  </div>
+                )}
                 {/* Only once the roster has called a shift: before that
                     attendance is 1.0 by definition, and a full green bar on
                     a first-day hire reads as a record they have not earned. */}
@@ -280,6 +311,46 @@ export default function App() {
                       turned up for {detail.work.attended} of {detail.work.offered} shifts
                     </div>
                   </>
+                )}
+                {detail.work.form !== null && (
+                  <>
+                    <Bar label="form" value={detail.work.form} />
+                    {detail.work.tasks.map((t, i) => (
+                      <div key={i} className="flex justify-between text-[11px] text-muted">
+                        <span>
+                          {t.title}
+                          {t.tired && <span style={{ color: 'hsl(38 62% 50%)' }}> · tired</span>}
+                        </span>
+                        <span className="tabular-nums">{t.quality}</span>
+                      </div>
+                    ))}
+                  </>
+                )}
+                {detail.work.review && (
+                  <div className="mt-1 text-[11px] text-muted">
+                    last review:{' '}
+                    <span style={{ color: VERDICT_HUE[detail.work.review.verdict] }}>
+                      {detail.work.review.verdict}
+                    </span>{' '}
+                    · {detail.work.review.by}
+                    {detail.work.review.comment && <div>“{detail.work.review.comment}”</div>}
+                  </div>
+                )}
+                {detail.work.reviewDue && (
+                  <div className="text-[11px] text-muted">review due</div>
+                )}
+                {detail.work.seconded && (
+                  <div className="text-[11px] text-muted">on a course the employer is paying for</div>
+                )}
+                {detail.work.ready && (
+                  <div className="text-[11px]" style={{ color: VERDICT_HUE.promote }}>
+                    ready for promotion — waiting for a seat
+                  </div>
+                )}
+                {detail.work.warnings > 0 && (
+                  <div className="text-[11px]" style={{ color: VERDICT_HUE.warn }}>
+                    {detail.work.warnings} warning{detail.work.warnings > 1 ? 's' : ''} standing
+                  </div>
                 )}
               </>
             )}

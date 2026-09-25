@@ -60,6 +60,8 @@ type TickMessage = {
   /** [x, y, action], index-aligned with the hello roster. */
   agents: [number, number, string][]
   events: string[]
+  /** Present only when someone retired and a newcomer took their slot. */
+  roster?: AgentIdentity[]
 }
 
 /** The `type` field discriminates the union, so each branch narrows. */
@@ -206,6 +208,7 @@ export class CityStore {
     this.tick = msg.t
     this.clock = msg.clock
     this.minuteOfDay = msg.minuteOfDay
+    if (msg.roster) this.roster = msg.roster
     if (msg.events.length) {
       this.events = [...msg.events, ...this.events].slice(0, 80)
     }

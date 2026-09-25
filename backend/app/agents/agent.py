@@ -98,12 +98,6 @@ class Agent:
     def employed(self) -> bool:
         return self.job is not None
 
-    @property
-    def has_routine(self) -> bool:
-        """Enrolled, employed, or both — someone the clock makes demands of.
-        A job imposes a morning exactly as a timetable does."""
-        return self.enrollment is not None or self.job is not None
-
     def move_to(self, tile: tuple[int, int]) -> None:
         self.x, self.y = tile
 

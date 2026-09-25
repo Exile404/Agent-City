@@ -4,11 +4,11 @@ A living city of 50 LLM agents who study at university, interview for jobs, get
 hired, and work under a management hierarchy — running entirely on a single
 consumer GPU, with no cloud API.
 
-> **Status: Phase 3 complete.** Agents have a memory stream, plan their own days,
-> and talk to whoever they run into — all on a local 3B model, admitted through a
-> cognition scheduler that rations a measured GPU budget. The institutions that
-> make it a *career* simulation (Phases 4–6) are not built yet. The roadmap marks
-> what exists.
+> **Status: Phase 6 complete.** Fifty agents study, interview, work shifts, are
+> reviewed, promoted, warned, let go, and eventually retire — all on a local 3B
+> model, admitted through a cognition scheduler that rations a measured GPU
+> budget. Phase 7 (reflection, deterministic replay, a metrics dashboard) is
+> next. The roadmap marks what exists.
 
 ## The constraint that shapes everything
 
@@ -36,9 +36,10 @@ tokens/min (~7 usable calls/min with realistic prompts) and Gemini Flash at
 **The simulation owns the numbers. The LLM owns the language and the judgment
 calls.**
 
-Skills, money, exam scores, task output, and promotions are computed
-deterministically in Python. The model writes dialogue, daily plans, interview
-questions, and verdicts — always conditioned on state that is actually true. A
+Skills, money, exam scores, task output, review verdicts and promotions are
+computed deterministically in Python. The model writes dialogue, daily plans,
+exam papers, interviews and hiring verdicts, and the words of every review —
+always conditioned on state that is actually true. A
 candidate whose Python skill is 35/100 is prompted to answer *as someone at
 35/100*, so a weak agent gives genuinely weak answers, the interviewer scores
 them low, and the rejection is earned rather than roleplayed.
@@ -51,7 +52,7 @@ This keeps the city coherent, cheap, and replayable.
 |---|---|---|---|
 | **0 — Reflex** | Pure Python | free | Every agent, every tick |
 | **1 — Fast** | `qwen2.5:3b` | 2 slots | Daily plans |
-| **2 — Deliberate** | `qwen2.5:3b` | 1 slot | Conversations, interviews, reflection |
+| **2 — Deliberate** | `qwen2.5:3b` | 1 slot | Conversations, exams, interviews, reviews |
 
 Tier 0 is what makes the city look continuously alive: needs decay, path
 following, action execution, and critical-need overrides. No agent ever blocks
@@ -76,7 +77,7 @@ everything between.
 | 3 | Co-location conversations, relationships, event feed | ✅ Done |
 | 4 | University: courses, exams, skill growth, credentials | ✅ Done |
 | 5 | Companies, job postings, LLM interviews, hiring | ✅ Done |
-| 6 | Org hierarchy, task assignment, reviews, promotions | ⬜ |
+| 6 | Org hierarchy, task assignment, reviews, promotions | ✅ Done |
 | 7 | Reflection, deterministic replay, metrics dashboard | ⬜ |
 
 ## Running it
@@ -123,6 +124,8 @@ cd backend && uvicorn app.net.server:app --port 8000
 Not `--reload`: uvicorn watches the working directory, and any `.py` file created,
 moved or edited there restarts the app — and the city with it, from tick 0,
 silently. `AC_TERM_DAYS=4` shortens terms for measurement runs; the default is 14.
+`AC_DAYS_PER_YEAR=1` ages the city a year a day, so retirement can be watched in
+about a minute; the default is 14.
 
 ```bash
 cd frontend && pnpm install && pnpm dev
@@ -133,8 +136,11 @@ agent to inspect their needs, skills, current action, and who they know — each
 relationship showing how often they have met, how they feel about each other, and
 the last thing that was said. Students also show their course, attendance,
 credentials, and their last few exam papers. Anyone with a job shows the role,
-the employer, what it pays a shift, and how many shifts they have turned up
-for; anyone walking to an interview shows where they are going.
+the employer, what it pays a shift, how many shifts they have turned up for, who
+they report to and who reports to them, their form and last three tasks, their
+last review, and whether they are on a course the employer is paying for, ready
+for the seat above, or carrying a warning; anyone walking to an interview shows
+where they are going.
 
 ## Architecture
 
@@ -369,6 +375,98 @@ At forty days, thirty-three of fifty hold jobs and their median balance climbs 2
 a day. Sixteen are at the university, training toward seats that are genuinely
 open and all want 35 or more.
 
+## How a career works
+
+Sixteen roles form seven ladders. A role names the rung above it, and that one
+field does two jobs: it is the seat a promotion leads to and the person who
+signs the review. Nobody stores a manager. It is derived from whoever holds the
+rung above at the same employer, skipping empty rungs, and when every rung above
+is empty the review is signed by "the management at Ledger Bank".
+
+Every finished shift produces one task, scored in Python on the interview's
+scale: fifty at the job's own bar, two points per point of margin, a stretch for
+how hard the task is, a roll for the day. Someone who only just cleared the
+interview turns in routine work around fifty, and the hard task sits fifteen
+points above them. Tasks come off a shuffle bag, one easy, one routine and one
+hard in every three. Drawn independently, the mix alone could leave a competent
+worker's fortnight below the warning line.
+
+Coming in exhausted costs a point of quality for every point of energy under 40.
+The first measurement found 27 tired tasks, and every one traced back to a
+Phase 5 exemption: only people with a routine had a bedtime, so a job-seeker slept
+eight hours in the afternoon, got hired, and worked their first week wrecked.
+Giving everyone a bedtime took it to zero; live it runs at 3 of 356.
+
+Work teaches the job and nothing past it. A shift adds skill with diminishing
+returns up to fifteen points past the job's bar, which is mastery of this rung.
+It never qualifies anyone for the next one, because every ladder changes skill
+on the way up: an Analyst needs analysis and a Product Lead needs management.
+
+**A review falls due every ten shifts the roster calls**: called, not attended,
+so someone who never turns up is still reviewed on time. The numbers set the
+verdict: **promote** at form 75 or better over the last ten tasks with 80%
+attendance, **warn** below 40 or below 60% attendance, **keep** otherwise. The
+model writes what the reviewer says, knowing the verdict, from tasks worded
+against their own difficulty:
+
+> *You demonstrated consistent effort and dedication by turning up for 8 out of
+> 10 shifts. However, your performance in more complex tasks such as restoring
+> damaged collections and cataloguing new arrivals was patchy.*
+> — Hugo Rahman, Systems Librarian, reviewing Nadia Novak
+
+Wording each task against its own difficulty is what made the reviews fair. On
+the raw scale a competent worker's hard task scores near 30, the model reads that
+as "poor", and 8 of its first 14 reviews were warnings.
+
+A promote does one of two things. If they already clear the door of the rung
+above and the seat is free, they move up. Insiders go first, including from a
+sister employer, and a transfer needs no interview, because nobody has a job to
+leave mid-interview. If they don't clear the door, the employer sends them on
+the course for the skill the rung needs: a full-time secondment on full pay,
+tuition waived. Passing makes them ready, and the next free seat is theirs.
+
+Two warnings inside the last three reviews end the seat. The window exists
+because both dismissals in an early run paired a fresh warning with one 58 and
+70 days old, four clean reviews earlier. The first review in any seat is
+probation. Promoted on credential credit, three of four new Analysts were warned
+at their first review. Learning on the job had the survivors back at the bar by
+the second, so the first review now counts as advice rather than a strike.
+Promoted-then-let-go went from 2 to 0.
+
+**The top did not move until someone left it.** Seven of the nine senior seats
+ask for management, and the only course in it tops out near 42 after a full
+term, so nobody rose into them in 120 days. Running a team now teaches
+management, up to the city's highest management bar of 60. A year in, eight
+people cleared a senior door and only one had gone through it: the holders were
+reliable, and nothing removes someone doing well. So the city ages. A year passes
+every fourteen sim-days, anyone reaching 65 retires, and someone of 18–25 moves
+into their home under a new id. Over 365 days: **15 retirements, 10 promotions
+(4 to a sister employer), 3 of 9 senior seats held by people promoted from
+inside**, and nobody left ready and waiting.
+
+Nadia Haddad's transcript is the whole path. Hired as an Analyst at Harbor
+Analytics on day 13, recommended for promotion at her first review, sent on
+Project Management and passed on day 40. She ran a team until her management
+stood at 70 against the seat's 60, collected eight more promote reviews with no
+seat free, and on day 293, the day Diego Kowalski retired as Product Lead at
+Nimbus Labs, moved into his office. Nobody wrote that arc.
+
+### Still open
+
+- **Debt has no consequence.** Chronic absentees cycle through hiring and
+  dismissal. Bianca Moreau was hired about ten times and ran out of money after
+  each one, and nothing in the city responds to it.
+- **Interviews have the review queue's old shape.** They are served one at a
+  time behind a six-hour grace timer, so the day-0 hiring rush is probably
+  decided from the numbers more often than it looks. `/health` cannot show it
+  yet.
+- **Task titles are imperatives.** A 3B pastes them into sentences: "your calm a
+  distressed family task". Noun phrases would read cleanly.
+- **Live drifts from headless.** Plans and conversations move people
+  differently from the utility policy, so a live city's careers diverge from the
+  headless runs they were tuned on. Phase 7's replay is where that gets
+  measured.
+
 ## The city
 
 A 70×50 grid on a 10-tile road pitch with 2-tile carriageways, giving 7×5 blocks
@@ -582,6 +680,39 @@ to be overspending by 355 at day 8, which read as three extra meals a day. Spawn
 is deterministic, so a headless run gives every starting balance: 215 of the gap
 was the seed, 40 was tuition against stipend, and the behaviour was one meal, not
 three. The measurement cost one command and prevented a fix to the wrong thing.
+
+**A queue served one at a time needs a clock that knows it.** Every live review
+was written from the numbers: 0 of 16 by the model. A fortnight's reviews fall
+due together because everyone was hired in the same week, the Hub sends them one
+at a time, and each carried its own half-day grace timer from the moment it fell
+due. Tariq Kowalski fell due at tick 348 and was written at 492, still waiting
+in line. With a model on, the timer is now a three-day backstop: 26 of 26.
+
+**A judgement that cannot give its reason is noise.** The model was allowed to
+decline a promotion the numbers recommended. It declined 40% of them with the
+comment written first and 56% with the verdict first, under comments praising
+the work, and it gave identical records opposite verdicts: form 87, 8 of 10
+shifts, no weak task, promoted four times in five for one person and never for
+the other. It would also have run live careers at half the pace the headless
+tuning assumed. The record now sets the verdict, and all 50 of 50 reviews read
+coherently.
+
+**Measure a rare event with a bench, not a city.** A promotion-eligible review
+comes about twice a fortnight live. `promptbench` collects every one from a
+seeded 120-day headless run and sends each prompt to the model five times, so a
+wording change is a before-and-after on the same ten cases in minutes instead
+of a day's live run.
+
+**A smoke test at absurd speed finds what a normal one cannot.** At one year a
+day every original resident retires by day 47, which turned up a newcomer who
+arrived and never moved: their opening action was never started, so it never
+ended. One missing call, invisible at fourteen days a year until day 285.
+
+**A ladder is only as good as its bottom rung's attendance.** Kestrel Power
+Station had the longest commute in the city on a six-day week: 45% attendance,
+17 let go in 120 days, and nobody lasting to a first review, so its ladder never
+promoted anyone. On weekdays it runs at 64%, and city-wide dismissals over a
+year fell from 186 to 111.
 
 ## License
 

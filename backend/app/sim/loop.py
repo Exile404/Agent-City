@@ -18,20 +18,34 @@ from app.cognition.prompts import PlanStep
 from app.config import CONFIG
 from app.institutions.companies import (
     APPLY_COOLDOWN_TICKS,
+    FINE_WORK,
     FIRING_ATTENDANCE,
     FIRING_GRACE_SHIFTS,
     HIRE_MARK,
+    MANAGING_ROLES,
+    POOR_WORK,
     REJECTION_COOLDOWN_DAYS,
+    REVIEW_EVERY,
+    WARNINGS_TO_FIRE,
     Application,
     Job,
+    Review,
+    allowed_verdicts,
     best_vacancy,
+    clears_door,
+    do_task,
+    expected_verdict,
     headcount,
     interview_score,
+    live_warnings,
+    ladder_above,
+    leadership_gain,
     shift_closes_now,
     shift_now,
     shift_starts_now,
     shows_up,
     vacancies,
+    work_gain,
 )
 from app.institutions.university import (
     BEDTIME_ENERGY,
@@ -49,9 +63,9 @@ from app.institutions.university import (
 from app.sim.clock import TICKS_PER_DAY, Clock
 from app.sim.layout import build_city
 from app.sim.pathing import PathCache
-from app.sim.spawn import spawn_agents
+from app.sim.spawn import birthday, newcomer, spawn_agents
 from app.sim.world import Building, BuildingKind, TileKind
-
+from app.institutions.companies import BY_ID as ROLES
 
 #: Need -> (what fixes it, where it happens). None means the agent's own home.
 NEED_REMEDY: dict[str, tuple[ActionKind, BuildingKind | None]] = {
@@ -80,6 +94,10 @@ class Simulation:
         self.events_total = 0
         self.agents = spawn_agents(self.world, self.rng)
         self.by_id = {a.id: a for a in self.agents}
+        #: Every name ever given, so a newcomer never arrives wearing a retiree's.
+        self._used_names = {a.name for a in self.agents}
+        self._next_agent = len(self.agents)
+        self._aged_day = -1
         # spawn builds actions without a deadline; _begin stamps one, otherwise
         # the opening IDLE never ends.
         for agent in self.agents:
@@ -104,6 +122,32 @@ class Simulation:
         self.hires = 0
         self.rejections = 0
         self.firings = 0
+        #: Every paid shift should produce exactly one. Counted apart from
+        #: shifts_worked so a shift that paid without being scored shows as a gap.
+        self.tasks_done = 0
+        #: Of those, done below FATIGUE_LINE.
+        self.tired_tasks = 0
+        #: Skill points handed out by work rather than by the university.
+        self.work_skill_gained = 0.0
+        #: Due for review, waiting for a model or the grace timer.
+        self.pending_reviews: list[Agent] = []
+        #: How long a due review waits before the sim writes it from the numbers.
+        #: The Hub stretches it when a model is reviewing.
+        self.review_grace = self.REVIEW_GRACE_TICKS
+        #: Verdicts actually recorded, however they were reached.
+        self.review_verdicts: Counter[str] = Counter()
+        self.promotions = 0
+        #: Terms an employer paid for, and dismissals at the second warning.
+        self.sponsored = 0
+        self.dismissals = 0
+        #: Promotions that crossed to a sister employer.
+        self.transfers = 0
+        #: Management learned by running a team rather than on a course.
+        self.management_learned = 0.0
+        self.retirements = 0
+        #: Bumped when someone leaves and someone new moves in. The frontend
+        #: learns names once, when it connects, and has to be told.
+        self.roster_version = 0
 
     def tick(self) -> None:
         self.clock.advance()
@@ -113,7 +157,9 @@ class Simulation:
         self._mark_shifts()
         self._check_terms()
         self._check_interviews()
+        self._check_reviews()
         self._bill_day()
+        self._age_city()
         hours = CONFIG.world.minutes_per_tick / 60.0
         for agent in self.agents:
             self._step(agent, hours)
@@ -136,7 +182,7 @@ class Simulation:
             if not action.path:
                 self._begin(agent, action.then or Action(ActionKind.IDLE))
         elif action.is_done(self.clock.tick):
-            self._pay_shift(agent, action)
+            self._finish_shift(agent, action)
             self._begin(agent, self._choose_action(agent))
 
     def _begin(self, agent: Agent, action: Action) -> None:
@@ -225,10 +271,11 @@ class Simulation:
 
         need = agent.needs.lowest()[0]
         # Someone with energy to spare does not nap at ten in the morning; if
-        # energy is genuinely low the critical check already caught it.
+        # energy is genuinely low the critical check already caught it. Job-
+        # seekers included: a daytime sleep runs a full night's length, and one
+        # taken while looking for work is carried into the job that follows.
         if (
             need == "energy"
-            and agent.has_routine
             and not is_bedtime(self.clock.hour)
             and agent.needs.energy >= DAYTIME_NAP_FLOOR
         ):
@@ -265,7 +312,7 @@ class Simulation:
         the ones they meant to make.
         """
         job = agent.job
-        if job is None:
+        if job is None or self.seconded(agent):
             return None
         if not shift_now(job.role, self.clock.weekday, self.clock.minute_of_day):
             return None
@@ -360,15 +407,29 @@ class Simulation:
         self._begin(agent, due)
 
     def _will_attend(self, agent: Agent) -> bool:
-        """Whether temperament sends this agent to today's class."""
+        """Whether temperament sends this agent to today's class.
+
+        A course the employer pays for is attended like a job, not a lecture.
+        On the student rate, 4 of 11 sponsored terms were failed by staff who
+        turn up for work reliably skipping class on full pay.
+        """
         e = agent.enrollment
-        return e is not None and attends(agent.id, e.course_id, self.clock.day, agent.traits)
+        if e is None:
+            return False
+        if e.sponsor is not None:
+            return shows_up(agent.id, e.course_id, self.clock.day, agent.traits)
+        return attends(agent.id, e.course_id, self.clock.day, agent.traits)
 
     def _bedtime(self, agent: Agent) -> Action | None:
-        """Anyone with somewhere to be tomorrow turning in for the night.
+        """Everyone turning in for the night.
+
         Left to drift, sleep wanders across the clock and eats whatever the
-        morning was supposed to hold."""
-        if not agent.has_routine or agent.action.kind is ActionKind.SLEEP:
+        morning was supposed to hold. Nobody is exempt: someone looking for
+        work is one interview from having a morning, and a new hire who
+        arrives sleeping days is caught in it — an exhausted shift earns an
+        afternoon sleep, they wake as this window opens, and it never fires.
+        """
+        if agent.action.kind is ActionKind.SLEEP:
             return None
         if not is_bedtime(self.clock.hour):
             return None
@@ -544,6 +605,17 @@ class Simulation:
         if passed:
             agent.credentials.append(course.id)
 
+        # A course the employer paid for is one term, pass or fail, then back
+        # to the job — with the promotion if it closed the gap and a seat is free.
+        if e.sponsor is not None:
+            agent.enrollment = None
+            job = agent.job
+            if self.ready_for_promotion(agent):
+                site = self._open_seat_for(agent)
+                if site is not None:
+                    self._promote(agent, site)
+            return score, passed
+
         # A term has ended. Work beats another term whatever the mark, because
         # studying is what someone does when they cannot get hired, not a
         # career. Checked on a failure as much as on a pass: otherwise a weak
@@ -584,7 +656,7 @@ class Simulation:
         weekday, minute = self.clock.weekday, self.clock.minute_of_day
         for agent in self.agents:
             job = agent.job
-            if job is None:
+            if job is None or self.seconded(agent):
                 continue
             if shift_starts_now(job.role, weekday, minute):
                 self.shifts_offered += 1
@@ -593,13 +665,15 @@ class Simulation:
                 continue
             if self._on_shift(agent):
                 job.shifts_attended += 1
-                continue
-            urgent = "/urgent" if agent.needs.critical() else ""
-            self.shifts_missed[agent.action.kind.value + urgent] += 1
-            # Judged only on a day they failed to appear: nobody is dismissed
-            # on a morning they turned up for.
-            if job.shifts_offered >= FIRING_GRACE_SHIFTS and job.attendance < FIRING_ATTENDANCE:
-                self._fire(agent)
+            else:
+                urgent = "/urgent" if agent.needs.critical() else ""
+                self.shifts_missed[agent.action.kind.value + urgent] += 1
+                # Judged only on a day they failed to appear: nobody is
+                # dismissed on a morning they turned up for.
+                if job.shifts_offered >= FIRING_GRACE_SHIFTS and job.attendance < FIRING_ATTENDANCE:
+                    self._fire(agent)
+                    continue
+            self._queue_review(agent)
 
     @staticmethod
     def _on_shift(agent: Agent) -> bool:
@@ -613,6 +687,175 @@ class Simulation:
             and action.then is not None
             and action.then.for_shift
         )
+
+    def manager_of(self, agent: Agent) -> Agent | None:
+        """Whoever holds the nearest filled rung above this agent's, at the
+        same employer. An empty rung is skipped, so a clerk whose records
+        office is vacant answers to the ward manager instead.
+
+        Derived on every call, never stored, for the same reason as headcount:
+        the agents' own jobs are the one record of who works where, and a
+        stored org chart would go stale the first time anybody was let go.
+        Two holders of the rung above — only the records office has that —
+        means the first on the roster takes the whole team.
+        """
+        job = agent.job
+        if job is None:
+            return None
+        for boss in ladder_above(job.role):
+            for other in self.agents:
+                j = other.job
+                if j is not None and j.employer_id == job.employer_id and j.role_id == boss.id:
+                    return other
+        return None
+
+    def reports_of(self, agent: Agent) -> list[Agent]:
+        """Everyone whose manager this agent is."""
+        if agent.job is None:
+            return []
+        employer = agent.job.employer_id
+        return [
+            other
+            for other in self.agents
+            if other.job is not None
+            and other.job.employer_id == employer
+            and self.manager_of(other) is agent
+        ]
+
+    def _finish_shift(self, agent: Agent, action: Action) -> None:
+        """A shift that ran its course: paid, the day's task scored, and a
+        little learned.
+
+        Whoever dispatched the agent signs for it, exactly as with the class
+        register — so someone who skips work earns less, learns less and has
+        less to show at review, without a single rule being written about
+        skipping. Actions are never interrupted, so a shift begun is a shift
+        worked.
+        """
+        job = agent.job
+        if not action.for_shift or job is None:
+            return
+        if action.kind is not ActionKind.WORK or action.target_id != job.employer_id:
+            return
+        agent.money += job.role.wage
+        self.shifts_worked += 1
+
+        skill = job.role.skill
+        # Scored on the skill they walked in with and the energy they walk out
+        # with. What today taught them shows up tomorrow.
+        title, quality, tired = do_task(
+            agent.id, job, self.clock.day, agent.skills[skill], agent.needs.energy
+        )
+        job.record(title, quality, tired)
+        self.tasks_done += 1
+        self.tired_tasks += tired
+        gain = work_gain(agent.skills[skill], job.role)
+        agent.skills[skill] += gain
+        self.work_skill_gained += gain
+        # Running a team teaches management, the way doing the job teaches the
+        # job's own skill.
+        if (
+            skill != "management"
+            and job.role_id in MANAGING_ROLES
+            and self.reports_of(agent)
+        ):
+            lead = leadership_gain(agent.skills["management"])
+            agent.skills["management"] += lead
+            self.management_learned += lead
+
+        if POOR_WORK < quality < FINE_WORK:
+            return
+        good = quality >= FINE_WORK
+        employer = self.world.buildings[job.employer_id].name
+        agent.memory.add(
+            self.clock.tick,
+            "observation",
+            f"{'Good' if good else 'Bad'} day at {employer}: {title.lower()}"
+            + (", worn out" if tired else ""),
+            importance=5.0,
+        )
+        self.log(f"{agent.name} had a {'good' if good else 'bad'} day at {employer}")
+
+    #: Ticks a review may wait on a model before the simulation writes it
+    #: itself. Half a day: nobody is waiting on it, but it should land in the
+    #: same working week as the shifts it judges.
+    REVIEW_GRACE_TICKS = TICKS_PER_DAY // 2
+
+    def _queue_review(self, agent: Agent) -> None:
+        """Put someone up for review once the roster has called enough shifts."""
+        job = agent.job
+        if job.review_due_tick >= 0:
+            return
+        if job.shifts_offered - job.reviewed_offered < REVIEW_EVERY:
+            return
+        job.review_due_tick = self.clock.tick
+        self.pending_reviews.append(agent)
+
+    def _check_reviews(self) -> None:
+        """Write any review nobody has come for, and drop any whose seat is gone."""
+        for agent in list(self.pending_reviews):
+            job = agent.job
+            if job is None or job.review_due_tick < 0:
+                self.pending_reviews.remove(agent)
+            elif (
+                not job.review_in_flight
+                and self.clock.tick - job.review_due_tick >= self.review_grace
+            ):
+                self.hold_review(agent)
+
+    def reviewer_of(self, agent: Agent) -> str:
+        """Who signs the review: the manager, or the employer itself when
+        every rung above is empty."""
+        boss = self.manager_of(agent)
+        if boss is not None:
+            return boss.name
+        return f"the management at {self.world.buildings[agent.job.employer_id].name}"
+
+    def hold_review(self, agent: Agent, verdict: str | None = None, comment: str = "") -> Review:
+        """Record a review. verdict=None writes it from the numbers alone.
+
+        The verdict is always the record's (allowed_verdicts); the Hub passes
+        the model's reply for the words. What a verdict leads to is the
+        simulation's: a promote moves them up if they qualify and a seat is
+        free, or sends them on a course if they do not qualify; a second
+        warning in one seat ends it.
+        """
+        job = agent.job
+        top = job.role.reports_to is None
+        attendance = job.window_attendance
+        expected = expected_verdict(job.form, attendance, top)
+        # The schema already restricts a model; this is the simulation owning
+        # what is possible either way.
+        if verdict is None or verdict not in allowed_verdicts(job.form, attendance, top):
+            verdict = expected
+        review = Review(
+            self.clock.tick, self.reviewer_of(agent), verdict, comment,
+            job.form, attendance, expected,
+        )
+        job.reviews.append(review)
+        job.reviewed_offered, job.reviewed_attended = job.shifts_offered, job.shifts_attended
+        job.review_due_tick = -1
+        if agent in self.pending_reviews:
+            self.pending_reviews.remove(agent)
+        self.review_verdicts[verdict] += 1
+
+        employer = self.world.buildings[job.employer_id].name
+        agent.memory.add(
+            self.clock.tick,
+            "milestone",
+            f"Review at {employer} by {review.reviewer}: {verdict}"
+            + (f" — {comment}" if comment else ""),
+        )
+        self.log(
+            f"{agent.name} was reviewed at {employer}: {verdict}"
+            + (f" — {comment}" if comment else "")
+        )
+        if verdict == "warn" and live_warnings(job) >= WARNINGS_TO_FIRE:
+            self.dismissals += 1
+            self._fire(agent, f"after {WARNINGS_TO_FIRE} warnings")
+        elif verdict == "promote":
+            self._after_promote_verdict(agent)
+        return review
 
     #: Ticks an application may wait for a model's verdict before the sim
     #: decides it. Six hours — a candidate left sitting in a lobby overnight is
@@ -631,25 +874,26 @@ class Simulation:
             ):
                 self.hire_or_reject(agent)
 
-    def _fire(self, agent: Agent) -> None:
-        """Let someone go for chronic absence.
+    def _fire(self, agent: Agent, why: str | None = None) -> None:
+        """Let someone go — for chronic absence, or at the second warning in
+        one seat.
 
-        The seat reopens, which is what keeps the market a market. They keep
-        their skills and their credentials and go back to looking, with a gap
-        in the record and that employer closed to them for a while.
+        The seat goes to anyone ready on the rung below first, then back to the
+        market. They keep their skills and their credentials and go back to
+        looking, with a gap in the record and that employer closed to them for
+        a while.
         """
         job = agent.job
         employer = self.world.buildings[job.employer_id].name
         agent.job = None
         agent.rejected_by[job.employer_id] = self.clock.tick
+        why = why or f"turned up for {job.shifts_attended} of {job.shifts_offered} shifts"
         agent.memory.add(
-            self.clock.tick,
-            "milestone",
-            f"Let go as {job.role.title} at {employer} — turned up for"
-            f" {job.shifts_attended} of {job.shifts_offered} shifts",
+            self.clock.tick, "milestone", f"Let go as {job.role.title} at {employer} — {why}"
         )
         self.log(f"{agent.name} was let go from {employer}")
         self.firings += 1
+        self._fill_from_within(job.employer_id, job.role_id)
 
     def hire_or_reject(self, agent: Agent, verdict: bool | None = None) -> bool:
         """Record an interview result. verdict=None decides it deterministically.
@@ -701,21 +945,184 @@ class Simulation:
             self._enroll(agent, prefer=role.skill)
         return False
 
-    # -------------------------------------------------------------------- money
+    # ---------------------------------------------------------------- careers
 
-    def _pay_shift(self, agent: Agent, action: Action) -> None:
-        """Wages land on a finished shift, not on the calendar.
+    @staticmethod
+    def seconded(agent: Agent) -> bool:
+        """Away on a course the employer is paying for. No shifts are called,
+        so no tasks, no reviews, and no absence counted against a seat they
+        are away from with permission."""
+        e = agent.enrollment
+        return e is not None and e.sponsor is not None
 
-        Whoever dispatched the agent signs for it, exactly as with the class
-        register — so someone who skips work earns less without a single rule
-        being written about skipping work.
+    def _seat_free(self, employer_id: str, role_id: str) -> bool:
+        taken = headcount(a.job for a in self.agents)
+        return taken[(employer_id, role_id)] < ROLES[role_id].seats
+
+    def ready_for_promotion(self, agent: Agent) -> bool:
+        """Recommended at their last review, through the rung above's ordinary
+        door, and not away on a course. Derived, never stored."""
+        job = agent.job
+        if job is None or job.role.reports_to is None or not job.reviews:
+            return False
+        if job.reviews[-1].verdict != "promote" or self.seconded(agent):
+            return False
+        return clears_door(agent.skills, agent.credentials, ROLES[job.role.reports_to])
+
+    def _after_promote_verdict(self, agent: Agent) -> None:
+        """A review said promote. Up now if they qualify and a seat on the rung
+        above is free here or at a sister employer; waiting if they qualify and
+        none is; sent to learn the rung's skill if they do not qualify at all."""
+        job = agent.job
+        nxt = ROLES[job.role.reports_to]
+        if self.ready_for_promotion(agent):
+            site = self._open_seat_for(agent)
+            if site is not None:
+                self._promote(agent, site)
+            return
+        if agent.enrollment is None:
+            self._sponsor(agent, nxt.skill)
+
+    def _sponsor(self, agent: Agent, skill: str) -> None:
+        """The employer pays for a term of the skill the rung above needs.
+
+        Every ladder in the city changes skill at each rung, and everyone is
+        hired into their strongest: measured over sixty days, the people
+        recommended for promotion stood 18 to 38 points short of the next
+        bar. No door credit bridges that without leaving them unable to do
+        the job they were promoted into.
         """
-        if not action.for_shift or agent.job is None:
+        course = choose_course(agent.skills, agent.credentials, prefer=skill)
+        if course is None or course.skill != skill:
+            return  # every course in that skill already passed
+        job = agent.job
+        employer = self.world.buildings[job.employer_id].name
+        agent.enrollment = Enrollment(
+            course_id=course.id, started_tick=self.clock.tick, sponsor=job.employer_id
+        )
+        agent.memory.add(self.clock.tick, "milestone", f"Sent to study {course.name} by {employer}")
+        self.log(f"{employer} sent {agent.name} to study {course.name}")
+        self.sponsored += 1
+
+    def _open_seat_for(self, agent: Agent) -> str | None:
+        """Where the rung above this agent has a free seat: their own employer
+        first, then any sister employer of the same kind. Only offices come in
+        more than one building, so only office ladders ever cross."""
+        job = agent.job
+        nxt = ROLES[job.role.reports_to]
+        sites = [job.employer_id] + sorted(
+            b.id for b in self.world.of_kind(nxt.employer) if b.id != job.employer_id
+        )
+        return next((s for s in sites if self._seat_free(s, nxt.id)), None)
+
+    def _promote(self, agent: Agent, employer_id: str | None = None) -> None:
+        """Up one rung — at their own employer, or at a sister employer whose
+        seat opened first. A fresh seat and a fresh record (tasks, reviews and
+        attendance start again, as for a hire), and the seat left behind goes
+        first to anyone ready for it.
+
+        Direct, not an interview: the review already approved the promotion,
+        and hire_or_reject assumes a candidate with no job to leave.
+        """
+        old = agent.job
+        role = ROLES[old.role.reports_to]
+        employer_id = employer_id or old.employer_id
+        employer = self.world.buildings[employer_id].name
+        moved = (
+            "" if employer_id == old.employer_id
+            else f", from {self.world.buildings[old.employer_id].name}"
+        )
+        agent.job = Job(employer_id, role.id, started_tick=self.clock.tick)
+        agent.memory.add(
+            self.clock.tick, "milestone", f"Promoted to {role.title} at {employer}{moved}"
+        )
+        self.log(f"{agent.name} was promoted to {role.title} at {employer}{moved}")
+        self.promotions += 1
+        self.transfers += bool(moved)
+        self._fill_from_within(old.employer_id, old.role_id)
+
+    def _fill_from_within(self, employer_id: str, role_id: str) -> None:
+        """A seat just opened. Someone ready for it takes it before the market
+        sees it — from the rung below at this employer first, then from the
+        same rung at a sister employer. A promotion leaves a seat of its own,
+        so this can cascade.
+
+        Measured before transfers: at 120 days five people were ready and
+        waiting, one of them for 94 days, while Analyst seats at other offices
+        went to outsiders.
+        """
+        candidates = [
+            a for a in self.agents
+            if a.job is not None
+            and a.job.role.reports_to == role_id
+            and self.ready_for_promotion(a)
+        ]
+        if not candidates:
             return
-        if action.kind is not ActionKind.WORK or action.target_id != agent.job.employer_id:
+        # Stable sort: their own staff first, then the roster's order.
+        candidates.sort(key=lambda a: a.job.employer_id != employer_id)
+        self._promote(candidates[0], employer_id)
+
+    # -------------------------------------------------------------- lifetimes
+
+    def _age_city(self) -> None:
+        """Once a sim-day: birthdays, and anyone reaching retirement age
+        retires. A year is CONFIG.population.days_per_year sim-days."""
+        if self.clock.day == self._aged_day:
             return
-        agent.money += agent.job.role.wage
-        self.shifts_worked += 1
+        self._aged_day = self.clock.day
+        year = CONFIG.population.days_per_year
+        # A copy: _retire swaps a newcomer into the list mid-loop, and they
+        # should not have a birthday on the day they arrive.
+        for index, agent in enumerate(list(self.agents)):
+            if self.clock.day % year != birthday(agent.id):
+                continue
+            agent.age += 1
+            if agent.age >= CONFIG.population.retire_age:
+                self._retire(index, agent)
+
+    def _retire(self, index: int, agent: Agent) -> None:
+        """Leave the city at retirement age; someone young moves into the home.
+
+        Without it nobody doing well ever left a seat: over 365 days the seven
+        management seats never changed hands after day 64, while eight people
+        inside cleared their doors and waited. The seat goes first to anyone
+        ready for it, like any other opening, and the city stays at fifty.
+        """
+        job = agent.job
+        home = self.world.buildings[agent.home_id]
+        where = f" from {self.world.buildings[job.employer_id].name}" if job else ""
+        # Cleared rather than left: a model may still be writing this person's
+        # interview, paper or review, and every one of those checks these
+        # before acting — so a reply for someone who has gone does nothing.
+        agent.job = None
+        agent.application = None
+        agent.enrollment = None
+        for queue in (self.pending_interviews, self.pending_exams, self.pending_reviews):
+            if agent in queue:
+                queue.remove(agent)
+        for other in self.agents:
+            other.relationships.pop(agent.id, None)
+        self.log(f"{agent.name} retired at {agent.age}{where}")
+        self.retirements += 1
+
+        arrival = newcomer(self.world, home.id, f"a{self._next_agent:02d}", self._used_names)
+        self._next_agent += 1
+        self._used_names.add(arrival.name)
+        self.agents[index] = arrival
+        del self.by_id[agent.id]
+        self.by_id[arrival.id] = arrival
+        self.roster_version += 1
+        # Started the way __init__ starts the first fifty. Without it the
+        # opening idle has no end time, is never done, and the newcomer
+        # stands in the doorway until every need runs out.
+        self._begin(arrival, arrival.action)
+        self.log(f"{arrival.name}, {arrival.age}, moved into {home.name}")
+
+        if job is not None:
+            self._fill_from_within(job.employer_id, job.role_id)
+
+    # -------------------------------------------------------------------- money
 
     def _bill_day(self) -> None:
         """Once a sim-day, at midnight: rent from everyone, tuition from
@@ -727,8 +1134,12 @@ class Simulation:
         for agent in self.agents:
             before = agent.money
             agent.money -= eco.daily_rent
-            if agent.enrollment is not None:
+            if agent.enrollment is not None and agent.enrollment.sponsor is None:
                 agent.money -= eco.tuition_per_day
+            if self.seconded(agent) and agent.job is not None:
+                # Full pay while away on the employer's course: the daily rate
+                # is what a normal week of shifts averages out to.
+                agent.money += agent.job.role.daily
             if not agent.employed:
                 agent.money += eco.unemployment_stipend
             self._note_broke(agent, before)

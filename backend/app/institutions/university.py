@@ -53,10 +53,10 @@ JOIN_LATE_MINUTES = 30
 #: window closing at midnight has everyone up ahead of the earliest 09:00 class.
 BEDTIME_FROM_HOUR = 21
 BEDTIME_TO_HOUR = 24
-#: Energy below which a student goes to bed once the window is open, even if
+#: Energy below which anyone goes to bed once the window is open, even if
 #: some other need is technically lower. Without this the routine never binds.
 BEDTIME_ENERGY = 75.0
-#: Energy above which a student refuses to nap during the day.
+#: Energy above which nobody naps during the day.
 DAYTIME_NAP_FLOOR = 30.0
 
 #: How much each trait moves the odds of turning up. Not a dimension the agents
@@ -101,7 +101,9 @@ class Enrollment:
     #: A model is writing this paper right now. Set by the Hub; the grace timer
     #: stands down while it is on, so the two deadlines never race.
     in_flight: bool = False
-
+    #: Employer id paying for this term, None for an ordinary student. A
+    #: sponsored student is seconded full-time on full pay and keeps their seat.
+    sponsor: str | None = None
     @property
     def course(self) -> Course:
         return BY_ID[self.course_id]

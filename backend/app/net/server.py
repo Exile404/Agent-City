@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections import Counter
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -12,12 +13,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.agents.agent import Agent
 from app.config import CONFIG
 from app.net.protocol import agent_detail, hello_message, tick_message
+from app.sim.clock import TICKS_PER_DAY
 from app.sim.loop import Simulation
 from app.cognition import prompts
 from app.cognition.embed import Embedder
 from app.cognition.llm import Lane, LLMClient, Request, parse_json
 from app.cognition.scheduler import Ask, Scheduler, plan_priority
-from app.institutions.companies import Application, standing
+from app.institutions.companies import BY_ID as ROLES
+from app.institutions.companies import (
+    Application,
+    Job,
+    allowed_verdicts,
+    standing,
+    graded_tasks,
+)
 from app.institutions.university import BY_ID as COURSES
 from app.institutions.university import Enrollment, baseline_score
 
@@ -25,6 +34,10 @@ from app.institutions.university import Enrollment, baseline_score
 class Hub:
     def __init__(self) -> None:
         self.sim = Simulation()
+        # The Hub works the review queue one at a time and a fortnight's reviews
+        # fall due together, so with a model on the timer is only a backstop.
+        if CONFIG.llm.enabled:
+            self.sim.review_grace = 3 * TICKS_PER_DAY
         self.clients: set[WebSocket] = set()
         self.speed = CONFIG.loop.default_speed
         self._task: asyncio.Task | None = None
@@ -47,6 +60,9 @@ class Hub:
         #: High-water mark for the event feed. One cursor, not one per client:
         #: every client receives the same broadcast.
         self._events_sent = 0
+        #: Roster version the clients last saw. One cursor, like _events_sent:
+        #: a browser that connects later gets the current names in its hello.
+        self._roster_sent = 0
         #: In-flight exam tasks. One paper at a time — they are rare and never
         #: urgent, and should not contend with conversations for the smart lane.
         self._exams: set[asyncio.Task] = set()
@@ -70,6 +86,19 @@ class Hub:
         #: Of the verdicts the model actually gave, how many were hires. The
         #: number to watch: a model that hires everyone is not interviewing.
         self.interviews_hired = 0
+        #: In-flight reviews. One at a time, like interviews: nobody is waiting
+        #: on one, and the smart lane is shared with conversations.
+        self._reviews: set[asyncio.Task] = set()
+        self.reviews_done = 0
+        #: Reply arrived but carried no usable verdict, or was unpublishable.
+        self.reviews_fallback = 0
+        #: No reply inside the window. Kept separate: opposite fixes.
+        self.reviews_timeout = 0
+        #: What was recorded, and (numbers said -> recorded) pairs. The record
+        #: sets the verdict, so every pair should read x->x; anything else means
+        #: the guard in hold_review is being bypassed.
+        self.review_verdicts: Counter[str] = Counter()
+        self.review_outcomes: Counter[str] = Counter()
 
     @property
     def _tick_seconds(self) -> float:
@@ -92,9 +121,11 @@ class Hub:
             self._collect_chats()
             self._collect_exams()
             self._collect_interviews()
+            self._collect_reviews()
             self._collect_asks()
             self.scheduler.dispatch(self.sim.clock.tick, self._start_thought)
-            msg = tick_message(self.sim, self._events_sent)
+            msg = tick_message(self.sim, self._events_sent, self._roster_sent)
+            self._roster_sent = self.sim.roster_version
             self._events_sent = self.sim.events_total
             await self.broadcast(msg)
             await asyncio.sleep(self._tick_seconds)
@@ -556,6 +587,82 @@ class Hub:
             # in the lobby forever.
             app.in_flight = False
 
+    def _collect_reviews(self) -> None:
+        """Send one waiting review to the model. Like interviews, a review
+        that misses its chance is not lost: the sim writes it once the grace
+        window expires."""
+        if not CONFIG.llm.enabled or self._reviews or not self.sim.pending_reviews:
+            return
+        self._start_review(self.sim.pending_reviews[0])
+
+    def _start_review(self, agent: Agent) -> None:
+        job = agent.job
+        if job is None or job.review_due_tick < 0:
+            return
+        # Stand the grace timer down while we work, so the deadlines never race.
+        job.review_in_flight = True
+        task = asyncio.create_task(self._review(agent, job))
+        self._reviews.add(task)
+        task.add_done_callback(self._reviews.discard)
+
+    async def _review(self, agent: Agent, job: Job) -> None:
+        """The model writes the review and reaches the verdict; the sim owns
+        what a verdict can lead to."""
+        role = job.role
+        allowed = allowed_verdicts(job.form, job.window_attendance, role.reports_to is None)
+        boss = self.sim.manager_of(agent)
+        try:
+            reply = await self._generate(
+                agent.id,
+                prompts.review(
+                    reviewer=self.sim.reviewer_of(agent),
+                    reviewer_role=boss.job.role.title if boss else None,
+                    reviewer_traits=boss.traits if boss else None,
+                    name=agent.name,
+                    role=role.title,
+                    employer=self.sim.world.buildings[job.employer_id].name,
+                    next_role=ROLES[role.reports_to].title if role.reports_to else None,
+                    days=(self.sim.clock.tick - job.started_tick) // TICKS_PER_DAY,
+                    attended=job.shifts_attended - job.reviewed_attended,
+                    offered=job.shifts_offered - job.reviewed_offered,
+                    tasks=graded_tasks(job),
+                    allowed=allowed,
+                ),
+                lane=Lane.SMART,
+                system=prompts.REVIEW_SYSTEM,
+                kind="review",
+                max_tokens=200,
+                temperature=0.7,
+                staleness=CONFIG.work.review_staleness_ticks,
+                schema=prompts.review_schema(allowed),
+            )
+
+            # Written by the grace timer meanwhile, or the seat is gone:
+            # writing it again would review one fortnight twice.
+            if agent.job is not job or job.review_due_tick < 0:
+                return
+
+            if reply is None:
+                self.reviews_timeout += 1
+                self.sim.hold_review(agent)
+                return
+
+            comment, verdict = prompts.parse_review(parse_json(reply), allowed)
+            if verdict is None or not prompts.is_publishable([("reviewer", comment)]):
+                self.reviews_fallback += 1
+                self.sim.hold_review(agent)
+                return
+
+            review = self.sim.hold_review(agent, verdict, comment)
+            self.reviews_done += 1
+            self.review_outcomes[f"{review.expected}->{review.verdict}"] += 1
+            self.review_verdicts[review.verdict] += 1
+        except Exception:
+            self.think_errors += 1
+        finally:
+            # On a raise or a cancel this is what stops the review waiting forever.
+            job.review_in_flight = False
+
     async def broadcast(self, message: dict) -> None:
         # Gather failures first: a set cannot be mutated while iterating, and a
         # client vanishing mid-broadcast would otherwise kill the tick task.
@@ -633,6 +740,20 @@ def health() -> dict:
             if hub.interviews_done
             else None
         ),
+        "reviewsDone": hub.reviews_done,
+        "reviewsHeld": sum(hub.sim.review_verdicts.values()),
+        "reviewsFallback": hub.reviews_fallback,
+        "reviewsTimeout": hub.reviews_timeout,
+        "reviewOutcomes": dict(hub.review_outcomes),
+        "reviewVerdicts": dict(hub.review_verdicts),
+        # The simulation keeps these counts, so read them from the simulation, not the hub.
+        "tasksDone": hub.sim.tasks_done,
+        "tiredTasks": hub.sim.tired_tasks,
+        "promotions": hub.sim.promotions,
+        "transfers": hub.sim.transfers,
+        "sponsored": hub.sim.sponsored,
+        "dismissals": hub.sim.dismissals,
+        "retirements": hub.sim.retirements,
     }
 
 

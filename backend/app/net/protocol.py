@@ -11,6 +11,7 @@ import base64
 
 from app.agents.agent import Agent
 from app.config import CONFIG
+from app.institutions.companies import live_warnings
 from app.institutions.university import BY_ID
 from app.sim.layout import BLOCK, ROAD_WIDTH
 from app.sim.loop import Simulation
@@ -47,16 +48,18 @@ def hello_message(sim: Simulation) -> dict:
             }
             for b in world.buildings.values()
         ],
-        # Identity is constant, so names and traits ship once. Tick frames refer
+        # Names and traits ship here, and again in a tick frame only when
+        # someone retires and a newcomer takes their place. Tick frames refer
         # to agents purely by their index into this list.
-        "agents": [
-            {"id": a.id, "name": a.name, "age": a.age, "traits": a.traits}
-            for a in sim.agents
-        ],
+        "agents": _roster(sim),
     }
 
 
-def tick_message(sim: Simulation, since_total: int) -> dict:
+def _roster(sim: Simulation) -> list[dict]:
+    return [{"id": a.id, "name": a.name, "age": a.age, "traits": a.traits} for a in sim.agents]
+
+
+def tick_message(sim: Simulation, since_total: int, roster_sent: int | None = None) -> dict:
     """What changed. Sent every tick."""
     tick = sim.clock.tick
     # Everything logged since the last frame, not everything stamped with the
@@ -64,7 +67,7 @@ def tick_message(sim: Simulation, since_total: int) -> dict:
     # tick's frame has already gone out, so a `t == tick` filter dropped them
     # entirely — the feed only ever showed events raised inside sim.tick().
     fresh = sim.events_total - since_total
-    return {
+    msg = {
         "type": "tick",
         "t": tick,
         "clock": str(sim.clock),
@@ -76,6 +79,12 @@ def tick_message(sim: Simulation, since_total: int) -> dict:
         # which would replay all 200 events on every quiet tick.
         "events": [text for _, text in list(sim.events)[-fresh:]] if fresh > 0 else [],
     }
+    # Someone retired and someone new moved in since the last frame: resend the
+    # names. About fifteen times a sim-year, so the whole list is fine.
+    if roster_sent is not None and roster_sent != sim.roster_version:
+        msg["roster"] = _roster(sim)
+    return msg
+
 
 def _study(a: Agent) -> dict:
     """The current term, as a transcript row."""
@@ -94,6 +103,7 @@ def _study(a: Agent) -> dict:
 def _work(sim: Simulation, a: Agent) -> dict:
     """The current job, as a payroll row."""
     j = a.job
+    boss = sim.manager_of(a)
     return {
         "role": j.role.title,
         "employer": sim.world.buildings[j.employer_id].name,
@@ -102,6 +112,26 @@ def _work(sim: Simulation, a: Agent) -> dict:
         "attendance": round(j.attendance, 2),
         "attended": j.shifts_attended,
         "offered": j.shifts_offered,
+        "manager": {"name": boss.name, "role": boss.job.role.title} if boss else None,
+        # Top of the ladder and "nobody above because the seats are empty" read
+        # the same without this, and slice 3 has to treat them differently.
+        "top": j.role.reports_to is None,
+        "reports": [r.name for r in sim.reports_of(a)],
+        "form": round(j.form) if j.form is not None else None,
+        # Newest first, and only a few: the panel is a glance, not a file.
+        "tasks": [
+            {"title": t, "quality": round(q), "tired": tired}
+            for t, q, tired in reversed(j.tasks[-3:])
+        ],
+        "review": (
+            {"verdict": j.reviews[-1].verdict, "by": j.reviews[-1].reviewer,
+             "comment": j.reviews[-1].comment, "expected": j.reviews[-1].expected}
+            if j.reviews else None
+        ),
+        "reviewDue": j.review_due_tick >= 0,
+        "seconded": sim.seconded(a),
+        "ready": sim.ready_for_promotion(a),
+        "warnings": live_warnings(j),
     }
 
 

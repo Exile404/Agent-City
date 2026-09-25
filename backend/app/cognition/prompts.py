@@ -440,3 +440,129 @@ def parse_interview(data: dict | None) -> tuple[str, str, bool | None, str]:
     if verdict.startswith("reject"):
         return question, answer, False, reason
     return question, answer, None, reason
+
+
+# ------------------------------------------------------------------ reviews
+
+REVIEW_SYSTEM = (
+    "You write performance reviews at a city employer. "
+    "Reply only with JSON carrying both keys: verdict, comment. "
+    "The comment is the reviewer speaking to the employee — second person, at "
+    "most two sentences, naming at least one task they did. "
+    "Judge the work and the attendance you are shown, never the person's character. "
+    "Keep everything suitable for a general audience."
+)
+
+#: How hard each STRETCH level is, in words.
+LEVELS = ("easy", "routine", "hard")
+
+
+def _grade(standing: float) -> str:
+    """A task's result as a reviewer would put it, already judged against how
+    hard the task was. Never the raw score: on that scale a competent worker's
+    hard task sits near 30, read as "poor", and drew a warning in 8 of the
+    model's first 14 reviews. 50 is what someone exactly at the bar turns in,
+    60 just past the interview, 80 mastery."""
+    if standing >= 85:
+        return "excellent"
+    if standing >= 75:
+        return "good"
+    if standing >= 60:
+        return "solid"
+    if standing >= 50:
+        return "patchy"
+    return "poor"
+
+
+def review_schema(allowed: tuple[str, ...]) -> dict:
+    """The verdict is an enum of what this role can actually be told."""
+    return {
+        "type": "object",
+        "properties": {
+            "verdict": {"type": "string", "enum": list(allowed)},
+            "comment": {"type": "string"},
+        },
+        "required": ["verdict", "comment"],
+    }
+
+
+def review(
+    *,
+    reviewer: str,
+    reviewer_role: str | None,
+    reviewer_traits: list[str] | None,
+    name: str,
+    role: str,
+    employer: str,
+    next_role: str | None,
+    days: int,
+    attended: int,
+    offered: int,
+    tasks: list[tuple[str, int, float, bool]],
+    allowed: tuple[str, ...],
+) -> str:
+    """Two working weeks of facts, and the verdict the record sets.
+
+    The simulation reaches the verdict from the numbers (allowed_verdicts) and
+    the model writes what the reviewer says, knowing it. Every task's result is
+    worded against its own difficulty, so a run of hard assignments reads as
+    that and not bad work.
+    """
+    who = (
+        f"{reviewer}, the {reviewer_role} {name} reports to, who is "
+        f"{' and '.join(reviewer_traits or [])},"
+        if reviewer_role
+        else reviewer[:1].upper() + reviewer[1:]
+    )
+    if tasks:
+        work = "\n".join(
+            f"- {title} ({LEVELS[level]}): {_grade(s)}" + (", done exhausted" if tired else "")
+            for title, level, s, tired in tasks
+        )
+        overall = sum(s for _, _, s, _ in tasks) / len(tasks)
+        work += f"\nTaken together, their work has been {_grade(overall)}."
+    else:
+        work = "- nothing: they have not finished a shift since the last review."
+
+    # The record sets the verdict; the comment, written knowing it, explains it.
+    verdict = allowed[0]
+    choice = {
+        "keep": 'Their record puts them in good standing, so the verdict is "keep".',
+        "promote": f'Their record qualifies them for {next_role}, so the verdict is "promote".',
+        "warn": "Their record has fallen below what the job accepts, in the work or "
+        'the attendance, so the verdict is "warn".',
+    }[verdict]
+    fit = {
+        "keep": "",
+        "promote": " Tell them what in the record earned it.",
+        "warn": " Tell them what in the record has to improve.",
+    }[verdict]
+    example = f'{{"verdict": "{verdict}", "comment": "Your ... has been ..."}}'
+
+    return f"""{who} is reviewing {name}, {role} at {employer}, {days} days into the job.
+
+Since the last review {name} turned up for {attended} of the {offered} shifts they were rostered for.
+
+Their recent work, each task with how hard it was:
+{work}
+
+Each result is already judged against how hard the task was: "solid" on a
+hard task means a hard task done well. Judge the pattern across the fortnight,
+not the single best or worst day.
+
+{choice}
+
+Now write the comment: what the reviewer says to {name}, at most two
+sentences, naming at least one task.{fit}
+
+Reply with JSON holding both keys — verdict, comment — exactly like this:
+{example}"""
+
+
+def parse_review(data: dict | None, allowed: tuple[str, ...]) -> tuple[str, str | None]:
+    """Return (comment, verdict). verdict=None means unusable; never raises."""
+    if not isinstance(data, dict):
+        return "", None
+    comment = _clip(data.get("comment", ""), 300)
+    verdict = str(data.get("verdict", "")).strip().lower()
+    return comment, (verdict if verdict in allowed else None)

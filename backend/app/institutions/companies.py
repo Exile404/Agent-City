@@ -9,7 +9,7 @@ door can actually do the work.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from random import Random
 
 from app.config import CONFIG
@@ -41,6 +41,9 @@ class Role:
     hour: int
     #: Positions per building of this kind.
     seats: int = 1
+    #: The role one rung up at the same employer — who reviews this one, and
+    #: where a promotion leads. None at the top of the ladder.
+    reports_to: str | None = None
 
     @property
     def wage(self) -> float:
@@ -49,7 +52,7 @@ class Role:
 
 
 WEEKDAYS = (0, 1, 2, 3, 4)
-#: Utilities, the hospital and the market don't close for Saturday.
+#: The hospital and the market don't close for Saturday.
 SIX_DAYS = (0, 1, 2, 3, 4, 5)
 
 #: The whole labour market. Requirements are set against a spawn spread that
@@ -57,25 +60,58 @@ SIX_DAYS = (0, 1, 2, 3, 4, 5)
 #: day one, the 55s and 60s are not reachable without a degree. Those seats sit
 #: empty at first on purpose — the city should visibly have work nobody can do.
 ROLES: tuple[Role, ...] = (
-    Role("junior_eng", "Junior Engineer", BuildingKind.OFFICE, "programming", 30.0, 130.0, WEEKDAYS, 9, seats=2),
-    Role("analyst", "Analyst", BuildingKind.OFFICE, "analysis", 45.0, 180.0, WEEKDAYS, 10),
+    Role("junior_eng", "Junior Engineer", BuildingKind.OFFICE, "programming", 30.0, 130.0, WEEKDAYS, 9, seats=2, reports_to="analyst"),
+    Role("analyst", "Analyst", BuildingKind.OFFICE, "analysis", 45.0, 180.0, WEEKDAYS, 10, reports_to="product_lead"),
     Role("product_lead", "Product Lead", BuildingKind.OFFICE, "management", 60.0, 250.0, WEEKDAYS, 9),
-    Role("ward_clerk", "Ward Clerk", BuildingKind.HOSPITAL, "communication", 25.0, 120.0, SIX_DAYS, 8, seats=2),
-    Role("records", "Records Analyst", BuildingKind.HOSPITAL, "analysis", 40.0, 170.0, SIX_DAYS, 11, seats=2),
+    Role("ward_clerk", "Ward Clerk", BuildingKind.HOSPITAL, "communication", 25.0, 120.0, SIX_DAYS, 8, seats=2, reports_to="records"),
+    Role("records", "Records Analyst", BuildingKind.HOSPITAL, "analysis", 40.0, 170.0, SIX_DAYS, 11, seats=2, reports_to="ward_manager"),
     Role("ward_manager", "Ward Manager", BuildingKind.HOSPITAL, "management", 55.0, 230.0, SIX_DAYS, 9),
-    Role("stall_hand", "Stall Hand", BuildingKind.MARKET, "communication", 15.0, 110.0, SIX_DAYS, 7, seats=3),
+    Role("stall_hand", "Stall Hand", BuildingKind.MARKET, "communication", 15.0, 110.0, SIX_DAYS, 7, seats=3, reports_to="floor_super"),
     Role("floor_super", "Floor Supervisor", BuildingKind.MARKET, "management", 35.0, 160.0, SIX_DAYS, 10),
-    Role("teller", "Teller", BuildingKind.BANK, "communication", 25.0, 125.0, WEEKDAYS, 9, seats=2),
+    Role("teller", "Teller", BuildingKind.BANK, "communication", 25.0, 125.0, WEEKDAYS, 9, seats=2, reports_to="risk"),
     Role("risk", "Risk Analyst", BuildingKind.BANK, "analysis", 55.0, 240.0, WEEKDAYS, 10),
-    Role("power_tech", "Technician", BuildingKind.POWER, "analysis", 40.0, 175.0, SIX_DAYS, 8, seats=2),
-    Role("control_eng", "Control Engineer", BuildingKind.POWER, "programming", 55.0, 260.0, SIX_DAYS, 13),
-    Role("gas_tech", "Technician", BuildingKind.GAS, "analysis", 35.0, 165.0, WEEKDAYS, 8, seats=2),
+    # Weekdays, not six: the longest commute in the city on a six-day week ran
+    # Kestrel at 45% attendance with 17 let go in 120 days, and nobody there
+    # lasted to a first review — so its ladder never promoted anyone.
+    Role("power_tech", "Technician", BuildingKind.POWER, "analysis", 40.0, 175.0, WEEKDAYS, 8, seats=2, reports_to="control_eng"),
+    Role("control_eng", "Control Engineer", BuildingKind.POWER, "programming", 55.0, 260.0, WEEKDAYS, 13),
+    Role("gas_tech", "Technician", BuildingKind.GAS, "analysis", 35.0, 165.0, WEEKDAYS, 8, seats=2, reports_to="safety_lead"),
     Role("safety_lead", "Safety Lead", BuildingKind.GAS, "management", 50.0, 220.0, WEEKDAYS, 12),
-    Role("archivist", "Archivist", BuildingKind.LIBRARY, "communication", 30.0, 130.0, WEEKDAYS, 10, seats=2),
+    Role("archivist", "Archivist", BuildingKind.LIBRARY, "communication", 30.0, 130.0, WEEKDAYS, 10, seats=2, reports_to="sys_librarian"),
     Role("sys_librarian", "Systems Librarian", BuildingKind.LIBRARY, "design", 35.0, 155.0, WEEKDAYS, 13),
 )
 
 BY_ID: dict[str, Role] = {r.id: r for r in ROLES}
+
+
+def ladder_above(role: Role) -> list[Role]:
+    """Every rung above this one at the same employer, nearest first."""
+    out: list[Role] = []
+    while role.reports_to is not None:
+        role = BY_ID[role.reports_to]
+        out.append(role)
+    return out
+
+
+def _check_ladders() -> None:
+    """Fail at import, not mid-run. A ladder that points at another employer
+    or loops back on itself would otherwise hang the tick loop the first time
+    anybody asked who their manager was."""
+    for role in ROLES:
+        seen = {role.id}
+        above = role.reports_to
+        while above is not None:
+            boss = BY_ID[above]  # a typo'd id raises KeyError here, which is the point
+            if boss.employer is not role.employer or boss.id in seen:
+                raise ValueError(f"broken ladder at {role.id} -> {above}")
+            seen.add(boss.id)
+            above = boss.reports_to
+
+
+_check_ladders()
+
+#: Roles somebody reports to: the only seats that can have a team to run.
+MANAGING_ROLES = frozenset(r.reports_to for r in ROLES if r.reports_to)
 
 #: What a passed course is worth at the door, in skill points — on top of what
 #: the term actually taught. A credential is somebody else's word for you, and
@@ -117,7 +153,20 @@ REJECTION_COOLDOWN_DAYS = 3
 #: Ticks between applications. Job-hunting is not a full-time occupation, and
 #: every application costs a generation once the model is doing the interview.
 APPLY_COOLDOWN_TICKS = TICKS_PER_DAY
-
+#: Warnings in one seat that end it. Measured before this existed: over sixty
+#: days nobody collected two — six of the eight warned were let go for absence
+#: first. What it catches is the one case absence cannot: someone who turns up
+#: every day and works below what the job needs.
+WARNINGS_TO_FIRE = 2
+#: Reviews a warning stays live for — about six weeks. Without it a warning
+#: never expired: both dismissals in a 120-day run paired a fresh warning with
+#: one 58 and 70 days old, four clean reviews earlier.
+WARNING_WINDOW = 3
+#: Reviews at the start of a seat whose warnings stand as advice, not strikes.
+#: Promoted below the bar on credential credit, three of four new Analysts were
+#: warned at their first review; learning on the job (about 2.4 skill points a
+#: review period) had the survivors back at the bar by the second.
+PROBATION_REVIEWS = 1
 
 @dataclass
 class Job:
@@ -130,6 +179,21 @@ class Job:
     #: sim-wide shifts_worked is "finished it and was paid".
     shifts_offered: int = 0
     shifts_attended: int = 0
+    #: The latest tasks as (title, quality, tired), oldest first, capped at
+    #: TASK_RECORD. Everything a review reads about the work comes from here.
+    tasks: list[tuple[str, float, bool]] = field(default_factory=list)
+    #: Tasks done in this seat, uncapped. Drives the rota in do_task.
+    tasks_done: int = 0
+    #: Roster counters at the last review, so the next one judges the stretch
+    #: since rather than the whole tenure. Zero at hire: the first covers it all.
+    reviewed_offered: int = 0
+    reviewed_attended: int = 0
+    #: Reviews held in this seat, oldest first.
+    reviews: list[Review] = field(default_factory=list)
+    #: Tick a review fell due, -1 when none is waiting. While a model is writing
+    #: it the grace timer stands down, exactly as with interviews.
+    review_due_tick: int = -1
+    review_in_flight: bool = False
 
     @property
     def role(self) -> Role:
@@ -141,6 +205,27 @@ class Job:
         if self.shifts_offered == 0:
             return 1.0  # benefit of the doubt on the first morning
         return self.shifts_attended / self.shifts_offered
+
+    @property
+    def form(self) -> float | None:
+        """Mean quality of the recent tasks. None before the first one — no
+        record is not the same as a bad record."""
+        if not self.tasks:
+            return None
+        return sum(q for _, q, _ in self.tasks) / len(self.tasks)
+
+    @property
+    def window_attendance(self) -> float:
+        """Attendance since the last review. 1.0 before any shift is called."""
+        offered = self.shifts_offered - self.reviewed_offered
+        if offered == 0:
+            return 1.0
+        return (self.shifts_attended - self.reviewed_attended) / offered
+
+    def record(self, title: str, quality: float, tired: bool) -> None:
+        self.tasks.append((title, quality, tired))
+        del self.tasks[:-TASK_RECORD]
+        self.tasks_done += 1
 
 
 @dataclass(frozen=True)
@@ -273,3 +358,205 @@ def shift_closes_now(role: Role, weekday: int, minute_of_day: int) -> bool:
         return False
     shut = role.hour * 60 + SHIFT_LATE_MINUTES
     return 0 <= minute_of_day - shut < CONFIG.world.minutes_per_tick
+
+
+# ------------------------------------------------------------ what a shift does
+
+#: Difficulty of the easy, routine and hard task, in skill points above the
+#: job's own bar. Scored on the interview's scale — fifty at the difficulty,
+#: two points per point of margin — so someone who only just cleared the
+#: interview turns in routine work around fifty, and the hard task stretches.
+STRETCH = (-5.0, 5.0, 15.0)
+#: A bad day, or a good one. Spread of the roll, in quality points.
+QUALITY_NOISE = 10.0
+#: Energy below which the work suffers, read as the shift ends. Set under what
+#: an ordinary day should leave anyone with — a 13:00 shift after a normal
+#: night ends near fifty — so it catches someone who came in worn out, not
+#: someone whose shift simply runs late.
+FATIGUE_LINE = 40.0
+#: Quality points lost per point of energy below the line. Coming in empty
+#: costs forty: working like someone twenty skill points less able.
+FATIGUE_COST = 1.0
+#: How far past the job's own bar work can carry a skill. Every ladder in the
+#: city crosses skills, so this is not what keeps work from qualifying anyone
+#: for the rung above — the change of skill does that. It stops a long tenure
+#: inflating a skill without limit: work teaches the job, up to mastery of it.
+MASTERY_MARGIN = 15.0
+#: Tasks kept per job. About one review's worth: form is recent form, and a
+#: record that grew with tenure would let one good month carry someone forever.
+TASK_RECORD = 10
+#: Tasks good or bad enough to remember and mention in the feed. Everything in
+#: between is an ordinary day and tells nobody anything.
+FINE_WORK = 85.0
+POOR_WORK = 30.0
+
+#: Every role's work at the three STRETCH levels. Fixed data, like the
+#: curriculum, so a review has something concrete to cite and a model never
+#: has to invent what someone did.
+TASKS: dict[str, tuple[str, str, str]] = {
+    "junior_eng": ("Fix a failing test", "Review a pull request", "Ship a new feature"),
+    "analyst": ("Clean a quarter's data", "Build the weekly report", "Forecast next quarter's demand"),
+    "product_lead": ("Run the stand-up", "Plan the next release", "Settle a scope dispute"),
+    "ward_clerk": ("Book patient appointments", "Handle the front-desk rush", "Calm a distressed family"),
+    "records": ("File discharge summaries", "Audit a ward's records", "Trace a billing error"),
+    "ward_manager": ("Draw up the nurse rota", "Cover a short-staffed shift", "Lead an incident review"),
+    "stall_hand": ("Stock the stalls", "Work the lunchtime crowd", "Talk down an angry customer"),
+    "floor_super": ("Open the market floor", "Settle a vendor dispute", "Reorganise the floor layout"),
+    "teller": ("Process the morning deposits", "Open a new account", "Handle a fraud complaint"),
+    "risk": ("Score a loan application", "Stress-test the portfolio", "Model a default scenario"),
+    "power_tech": ("Log turbine readings", "Diagnose a pressure drop", "Trace an intermittent fault"),
+    "control_eng": ("Patch the control software", "Tune a feedback loop", "Rewrite a failing controller"),
+    "gas_tech": ("Check meter readings", "Inspect a pipeline section", "Find a pressure leak"),
+    "safety_lead": ("Run the safety briefing", "Review an incident report", "Lead an emergency drill"),
+    "archivist": ("Catalogue new arrivals", "Help a researcher find a source", "Restore a damaged collection"),
+    "sys_librarian": ("Fix the catalogue search", "Redesign the lending workflow", "Plan the digital archive"),
+}
+
+if set(TASKS) != set(BY_ID) or any(len(t) != len(STRETCH) for t in TASKS.values()):
+    raise ValueError("every role needs exactly one task per STRETCH level")
+
+
+def do_task(
+    agent_id: str, job: Job, day: int, skill: float, energy: float
+) -> tuple[str, float, bool]:
+    """Today's task for this seat, how well it went, and whether they were
+    worn out doing it.
+
+    The simulation owns all three. Which task comes up is the employer's rota:
+    a shuffle bag, so every three tasks hold one easy, one routine and one hard
+    in a seeded order. Drawn independently each day, one technician got the
+    hard task seven times in ten and was warned three reviews running for
+    nothing but the draw. How it goes is skill against difficulty, less what
+    exhaustion costs, plus the day's luck — seeded on (agent, employer, day)
+    like shows_up, with its own suffix so it never shares a roll with
+    attendance.
+    """
+    block, slot = divmod(job.tasks_done, len(STRETCH))
+    rota = Random(f"{agent_id}:{job.employer_id}:{job.started_tick}:{block}:rota")
+    level = rota.sample(range(len(STRETCH)), len(STRETCH))[slot]
+    difficulty = job.role.requires + STRETCH[level]
+    tired = energy < FATIGUE_LINE
+    roll = Random(f"{agent_id}:{job.employer_id}:{day}:task").gauss(0.0, QUALITY_NOISE)
+    quality = (
+        50.0
+        + (skill - difficulty) * 2.0
+        - max(0.0, FATIGUE_LINE - energy) * FATIGUE_COST
+        + roll
+    )
+    return TASKS[job.role_id][level], max(0.0, min(100.0, quality)), tired
+
+
+def work_gain(skill_now: float, role: Role) -> float:
+    """Skill points one finished shift teaches. The university's diminishing
+    returns at a tenth the size, stopping at mastery of this job."""
+    room = role.requires + MASTERY_MARGIN - skill_now
+    if room <= 0:
+        return 0.0
+    return min(room, CONFIG.work.shift_gain * (1.0 - skill_now / 100.0))
+
+
+# ----------------------------------------------------------------- reviews
+
+#: Shifts the roster calls between reviews — two working weeks. Counted in
+#: shifts called, not attended, so someone who never turns up is still
+#: reviewed on time; and equal to TASK_RECORD, so a review reads the stretch
+#: since the last one.
+REVIEW_EVERY = 10
+#: The verdict the numbers alone give: the fallback, and the yardstick a
+#: model's verdict is measured against. Both form lines come off the task
+#: scale. The average task sits five points above the job's bar, so expected
+#: form is 40 for someone exactly at the bar, 50 just past the interview, 70
+#: at mastery, 80 at the bar plus twenty.
+#:
+#: Promote: past what the job itself can teach.
+PROMOTE_FORM = 75.0
+PROMOTE_ATTENDANCE = 0.8
+#: Warn: turning in less than someone exactly at the bar would. At 45 a
+#: worker who honestly cleared the interview sat 1.6 sigma above the line and
+#: drew a warning from bad rolls alone about one review in sixteen; at 40 it
+#: is three sigma, about one in a thousand.
+WARN_FORM = 40.0
+#: The employer's line on absence is the same one it fires at.
+WARN_ATTENDANCE = FIRING_ATTENDANCE
+
+
+@dataclass(frozen=True)
+class Review:
+    tick: int
+    #: A name, or "the management at X" when nobody holds a rung above.
+    reviewer: str
+    verdict: str
+    comment: str
+    form: float | None
+    attendance: float
+    #: What the numbers alone said. Equal to verdict unless a model decided.
+    expected: str
+
+
+def expected_verdict(form: float | None, attendance: float, top: bool) -> str:
+    """The review the numbers alone would write. Nobody at the top of a
+    ladder is promoted: there is no rung to promote them to."""
+    if attendance < WARN_ATTENDANCE or (form is not None and form < WARN_FORM):
+        return "warn"
+    if not top and form is not None and form >= PROMOTE_FORM and attendance >= PROMOTE_ATTENDANCE:
+        return "promote"
+    return "keep"
+
+
+def allowed_verdicts(form: float | None, attendance: float, top: bool) -> tuple[str, ...]:
+    """What a review may say: exactly what the numbers say.
+
+    Given a free choice, a 3B promoted five people on one good task and warned
+    three on one bad one. Measured twice with promptbench: allowed only to
+    decline a promotion, it declined 40-56% of the time, under comments
+    praising the work, and gave identical records opposite verdicts. A
+    judgement that cannot give its reason is noise, and it ran live careers at
+    half the headless pace. The record sets the verdict; the model writes the
+    words.
+    """
+    return (expected_verdict(form, attendance, top),)
+
+
+def task_level(role_id: str, title: str) -> int:
+    """Which STRETCH level a recorded task was: 0 easy, 1 routine, 2 hard."""
+    return TASKS[role_id].index(title)
+
+
+def against_difficulty(quality: float, level: int) -> float:
+    """A task's quality with its difficulty taken back out, so an easy task
+    and a hard one read on one scale: 50 is what someone exactly at the job's
+    bar turns in on any task, 60 someone just past the interview, 80 mastery.
+    What a reviewer is told; form keeps the raw output."""
+    return quality + 2.0 * STRETCH[level]
+
+
+def graded_tasks(job: Job) -> list[tuple[str, int, float, bool]]:
+    """The recent tasks as a reviewer reads them: (title, level, quality
+    against difficulty, tired)."""
+    out = []
+    for title, quality, tired in job.tasks:
+        level = task_level(job.role_id, title)
+        out.append((title, level, against_difficulty(quality, level), tired))
+    return out
+
+def live_warnings(job: Job) -> int:
+    """Warnings still counting against this seat: those in the last
+    WARNING_WINDOW reviews, after probation."""
+    return sum(r.verdict == "warn" for r in job.reviews[PROBATION_REVIEWS:][-WARNING_WINDOW:])
+
+
+#: How far running a team can carry management: the city's highest management
+#: bar, Product Lead's 60. Seven of nine senior seats ask for management, the
+#: only course in it (Project Management, difficulty 0.6) tops out near 42 raw
+#: after a full term, and nothing else taught it — so nobody rose into those
+#: seats from inside in 120 days.
+LEADERSHIP_CEILING = 60.0
+
+
+def leadership_gain(skill_now: float) -> float:
+    """Management one shift of running a team teaches: work_gain's rate,
+    stopping at LEADERSHIP_CEILING."""
+    room = LEADERSHIP_CEILING - skill_now
+    if room <= 0:
+        return 0.0
+    return min(room, CONFIG.work.shift_gain * (1.0 - skill_now / 100.0))

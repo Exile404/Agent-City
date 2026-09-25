@@ -60,6 +60,14 @@ class PopulationConfig:
     initially_employed: float = 0.45
     #: Fraction that starts enrolled at the university.
     initially_students: float = 0.30
+    #: Age at which anyone retires and leaves the city.
+    retire_age: int = 65
+    #: Sim-days per year of age. Fourteen makes a career (25 to 65) about 560
+    #: sim-days and lets roughly 15 of 50 reach retirement in a 365-day run; at
+    #: 30 nobody would, at 7 the whole city would turn over inside a year.
+    days_per_year: int = _env_int("AC_DAYS_PER_YEAR", 14)
+    #: Age range of someone moving into a retiree's home.
+    newcomer_ages: tuple[int, int] = (18, 25)
 
 
 @dataclass(frozen=True)
@@ -205,6 +213,14 @@ class WorkConfig:
     #: candidate is sitting in a lobby, and Simulation.INTERVIEW_GRACE_TICKS
     #: decides it at 72 anyway.
     interview_staleness_ticks: int = _env_int("AC_INTERVIEW_STALENESS", 60)
+    #: Skill points a finished shift teaches at zero skill — a tenth of the
+    #: university's session_gain. Work makes someone better at the job they
+    #: have, slowly. AC_SHIFT_GAIN=0 switches it off, which leaves tasks as
+    #: pure observation.
+    shift_gain: float = _env_float("AC_SHIFT_GAIN", 0.6)
+    #: Ticks a review stays worth writing. Under Simulation.REVIEW_GRACE_TICKS
+    #: (144), so a slow model times out before the simulation writes it anyway.
+    review_staleness_ticks: int = _env_int("AC_REVIEW_STALENESS", 120)
 
 
 @dataclass(frozen=True)
