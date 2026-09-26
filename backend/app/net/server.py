@@ -10,11 +10,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.agents.actions import ActionKind
 from app.agents.agent import Agent
 from app.config import CONFIG
 from app.net.protocol import agent_detail, hello_message, tick_message
 from app.sim.clock import TICKS_PER_DAY
 from app.sim.loop import Simulation
+from app.sim.metrics import city_metrics
+from app.sim.replay import Recorder
 from app.cognition import prompts
 from app.cognition.embed import Embedder
 from app.cognition.llm import Lane, LLMClient, Request, parse_json
@@ -38,6 +41,7 @@ class Hub:
         # fall due together, so with a model on the timer is only a backstop.
         if CONFIG.llm.enabled:
             self.sim.review_grace = 3 * TICKS_PER_DAY
+        self.recorder: Recorder | None = None
         self.clients: set[WebSocket] = set()
         self.speed = CONFIG.loop.default_speed
         self._task: asyncio.Task | None = None
@@ -99,6 +103,20 @@ class Hub:
         #: the guard in hold_review is being bypassed.
         self.review_verdicts: Counter[str] = Counter()
         self.review_outcomes: Counter[str] = Counter()
+        #: In-flight reflections. One at a time: they run at night, when the smart
+        #: lane has nothing else to do, and nobody is waiting on one.
+        self._reflections: set[asyncio.Task] = set()
+        #: Tick each agent last tried to reflect, so a failing reply is not
+        #: retried all night and nobody reflects twice in one night.
+        self._reflect_tried: dict[str, int] = {}
+        self.reflections_done = 0
+        self.reflections_fallback = 0
+        self.reflections_timeout = 0
+        #: Plan and chat prompts that retrieved at least one reflection: whether
+        #: reflections are read at all, or only written.
+        self.prompts_with_reflection = 0
+        #: One metrics row per sim-morning since the server started, for /metrics.
+        self.history: list[dict] = []
 
     @property
     def _tick_seconds(self) -> float:
@@ -118,10 +136,15 @@ class Hub:
                 await asyncio.sleep(0.1)  # paused, but still answering /control
                 continue
             self.sim.tick()
+            if self.sim.clock.tick % TICKS_PER_DAY == 0:
+                self.history.append(self.metrics_row())
+                if self.recorder is not None:
+                    self.recorder.checkpoint(self.sim)
             self._collect_chats()
             self._collect_exams()
             self._collect_interviews()
             self._collect_reviews()
+            self._collect_reflections()
             self._collect_asks()
             self.scheduler.dispatch(self.sim.clock.tick, self._start_thought)
             msg = tick_message(self.sim, self._events_sent, self._roster_sent)
@@ -167,6 +190,7 @@ class Hub:
 
             query = await self.embedder.embed("what should I do with the rest of today?")
             recalled = agent.memory.retrieve(query, self.sim.clock.tick)
+            self.prompts_with_reflection += any(n.kind == "reflection" for n in recalled)
 
             reply = await self._generate(
                 agent.id,
@@ -191,14 +215,7 @@ class Hub:
             if not steps:
                 return
 
-            agent.plan = steps
-            agent.last_plan_tick = self.sim.clock.tick
-            agent.memory.add(
-                self.sim.clock.tick,
-                "plan",
-                "Planned: " + "; ".join(str(s) for s in steps[:3]),
-            )
-            self.sim.log(f"{agent.name} decided: {steps[0].why or steps[0]}")
+            self.sim.land_plan(agent, steps)
         except Exception:
             self.think_errors += 1
         finally:
@@ -331,6 +348,7 @@ class Hub:
             # five memories looking artificially recent that nothing ever read.
             a_recall = a.memory.retrieve(query, tick, k=3)
             b_recall = b.memory.retrieve(query, tick, k=3)
+            self.prompts_with_reflection += any(n.kind == "reflection" for n in a_recall + b_recall)
 
             rel = a.relationships[b.id]
             # times_met is already 1 by now — greet() ran before the score did —
@@ -369,38 +387,13 @@ class Hub:
                 self.chats_blocked += 1
                 return
 
-            self._apply_chat(a, b, lines, warmth, place)
+            if self.sim.land_chat(a, b, lines, warmth, place):
+                self.chats_done += 1
         except Exception:
             self.think_errors += 1
         finally:
             self._talking.discard(a.id)
             self._talking.discard(b.id)
-
-    def _apply_chat(
-        self, a: Agent, b: Agent, lines: list[tuple[str, str]], warmth: int, place: str
-    ) -> None:
-        """The model said it; the simulation decides what it changed.
-
-        Warmth is worth at most a few points either way. One conversation should
-        be able to start a friendship and never manufacture one, so who ends up
-        close stays mostly a matter of who keeps turning up.
-        """
-        tick = self.sim.clock.tick
-        transcript = " / ".join(f"{who.split()[0]}: {says}" for who, says in lines)
-
-        for x, y in ((a, b), (b, a)):
-            rel = x.relationships[y.id]
-            rel.affinity = max(-100.0, min(100.0, rel.affinity + warmth * 2.5))
-            rel.note = next((s for who, s in reversed(lines) if who == y.name), rel.note)
-            # Stored as "dialogue" (importance 4.0, above an observation): this is
-            # what lets the next conversation remember the last one, with no extra
-            # plumbing — it simply surfaces through normal retrieval.
-            x.memory.add(tick, "dialogue", f"Talked with {y.name} at {place} — {transcript}")
-            # A real exchange is worth more than the nod greet() already gave.
-            x.needs.restore("social", 10.0)
-
-        self.chats_done += 1
-        self.sim.log(f"{a.name} & {b.name} at {place} — {lines[0][1]}")
 
     def _collect_exams(self) -> None:
         """Send one pending paper to the model.
@@ -417,7 +410,7 @@ class Hub:
         if e is None:
             return
         # Stand the grace timer down while we work, so the two deadlines never race.
-        e.in_flight = True
+        self.sim.model_started("exam", agent)
         task = asyncio.create_task(self._exam(agent, e))
         self._exams.add(task)
         task.add_done_callback(self._exams.discard)
@@ -461,43 +454,29 @@ class Hub:
 
             if reply is None:
                 self.exams_timeout += 1
-                self.sim.sit_exam(agent)
+                self.sim.land_exam(agent, None, None, "")
                 return
 
             question, answer, mark, comment = prompts.parse_exam(parse_json(reply))
             publishable = prompts.is_publishable([("q", question), ("a", answer)])
+            paper = (question, answer) if publishable and question and answer else None
             if mark is None or not publishable:
-                self.exams_fallback += 1
                 # The simulation owns the number: a missing mark is no reason
                 # to bin a paper the model wrote well. Grade it and keep the script.
-                self.sim.sit_exam(agent)
-                if publishable and question and answer:
-                    agent.memory.add(
-                        self.sim.clock.tick,
-                        "milestone",
-                        f"{course.name} exam — asked: {question} — I answered: {answer}",
-                    )
+                self.exams_fallback += 1
+                self.sim.land_exam(agent, None, paper, "")
                 return
 
             # Recorded raw, before the clamp inside sit_exam.
             self.mark_delta_sum += mark - expected
             self.mark_delta_n += 1
-
-            score, passed = self.sim.sit_exam(agent, mark)
+            self.sim.land_exam(agent, mark, paper, comment or "")
             self.exams_done += 1
-            if question and answer:
-                agent.memory.add(
-                    self.sim.clock.tick,
-                    "milestone",
-                    f"{course.name} exam — asked: {question} — I answered: {answer}",
-                )
-            if comment:
-                self.sim.log(f"{agent.name} — {course.name} examiner: {comment}")
         except Exception:
             self.think_errors += 1
         finally:
             # On a raise or a cancel this is what stops the student waiting forever.
-            e.in_flight = False
+            self.sim.model_finished("exam", agent)
 
     def _collect_interviews(self) -> None:
         """Send one waiting candidate to the model.
@@ -514,7 +493,7 @@ class Hub:
         if app is None:
             return
         # Stand the grace timer down while we work, so the deadlines never race.
-        app.in_flight = True
+        self.sim.model_started("interview", agent)
         task = asyncio.create_task(self._interview(agent, app))
         self._interviews.add(task)
         task.add_done_callback(self._interviews.discard)
@@ -555,37 +534,31 @@ class Hub:
 
             if reply is None:
                 self.interviews_timeout += 1
-                self.sim.hire_or_reject(agent)
+                self.sim.land_interview(agent, None, None, "")
                 return
 
             question, answer, verdict, reason = prompts.parse_interview(parse_json(reply))
             publishable = prompts.is_publishable([("q", question), ("a", answer)])
-
             if verdict is None or not publishable:
                 # No usable verdict: the simulation falls back to its own. The
                 # transcript is still worth keeping if the model wrote one.
                 self.interviews_fallback += 1
-                self.sim.hire_or_reject(agent)
+                verdict = None
             else:
-                self.sim.hire_or_reject(agent, verdict)
                 self.interviews_done += 1
                 self.interviews_hired += int(verdict)
-
-            if publishable and question and answer:
-                agent.memory.add(
-                    self.sim.clock.tick,
-                    "milestone",
-                    f"{role.title} interview at {posting.employer_name}"
-                    f" — asked: {question} — I said: {answer}",
-                )
-            if publishable and reason:
-                self.sim.log(f"{agent.name} — {posting.employer_name}: {reason}")
+            self.sim.land_interview(
+                agent,
+                verdict,
+                (question, answer) if publishable and question and answer else None,
+                reason if publishable and reason else "",
+            )
         except Exception:
             self.think_errors += 1
         finally:
             # On a raise or a cancel this is what stops the candidate waiting
             # in the lobby forever.
-            app.in_flight = False
+            self.sim.model_finished("interview", agent)
 
     def _collect_reviews(self) -> None:
         """Send one waiting review to the model. Like interviews, a review
@@ -600,7 +573,7 @@ class Hub:
         if job is None or job.review_due_tick < 0:
             return
         # Stand the grace timer down while we work, so the deadlines never race.
-        job.review_in_flight = True
+        self.sim.model_started("review", agent)
         task = asyncio.create_task(self._review(agent, job))
         self._reviews.add(task)
         task.add_done_callback(self._reviews.discard)
@@ -644,16 +617,16 @@ class Hub:
 
             if reply is None:
                 self.reviews_timeout += 1
-                self.sim.hold_review(agent)
+                self.sim.land_review(agent)
                 return
 
             comment, verdict = prompts.parse_review(parse_json(reply), allowed)
             if verdict is None or not prompts.is_publishable([("reviewer", comment)]):
                 self.reviews_fallback += 1
-                self.sim.hold_review(agent)
+                self.sim.land_review(agent)
                 return
 
-            review = self.sim.hold_review(agent, verdict, comment)
+            review = self.sim.land_review(agent, verdict, comment)
             self.reviews_done += 1
             self.review_outcomes[f"{review.expected}->{review.verdict}"] += 1
             self.review_verdicts[review.verdict] += 1
@@ -661,7 +634,83 @@ class Hub:
             self.think_errors += 1
         finally:
             # On a raise or a cancel this is what stops the review waiting forever.
-            job.review_in_flight = False
+            self.sim.model_finished("review", agent)
+
+    #: Hours before the same agent may try to reflect again: one night.
+    REFLECT_RETRY_TICKS = TICKS_PER_DAY // 2
+
+    def _collect_reflections(self) -> None:
+        """Send the sleeper with the most on their mind to reflect.
+
+        Asleep because that is when the smart lane is free: the 30-day recording
+        landed 0.0-0.2 chats an hour between 23:00 and 07:00, while plans keep
+        the fast lane full around the clock.
+        """
+        if not CONFIG.llm.enabled or self._reflections:
+            return
+        tick = self.sim.clock.tick
+        ready = [
+            a for a in self.sim.agents
+            if a.action.kind is ActionKind.SLEEP
+            and a.memory.should_reflect()
+            and tick - self._reflect_tried.get(a.id, -self.REFLECT_RETRY_TICKS) >= self.REFLECT_RETRY_TICKS
+        ]
+        if ready:
+            agent = max(ready, key=lambda a: a.memory.since_reflection)
+            self._reflect_tried[agent.id] = tick
+            task = asyncio.create_task(self._reflect(agent))
+            self._reflections.add(task)
+            task.add_done_callback(self._reflections.discard)
+
+    async def _reflect(self, agent: Agent) -> None:
+        """The model draws the insights; the sim stores them as memories."""
+        try:
+            # The strongest recent memories, in the order they happened. Plans are
+            # left out: they are intentions, and there are dozens of them.
+            recent = [n for n in agent.memory.nodes[-60:] if n.kind != "plan"]
+            chosen = sorted(sorted(recent, key=lambda n: -n.importance)[:12], key=lambda n: n.tick)
+            if len(chosen) < 3:
+                return
+            reply = await self._generate(
+                agent.id,
+                prompts.reflection(
+                    name=agent.name, age=agent.age, traits=agent.traits,
+                    memories=[n.text for n in chosen],
+                ),
+                lane=Lane.SMART,
+                system=prompts.REFLECTION_SYSTEM,
+                kind="reflect",
+                max_tokens=220,
+                temperature=0.7,
+                staleness=CONFIG.cognition.reflect_staleness_ticks,
+                schema=prompts.REFLECTION_SCHEMA,
+            )
+            if reply is None:
+                self.reflections_timeout += 1
+                return
+            insights = prompts.parse_reflection(parse_json(reply))
+            if not insights or not prompts.is_publishable([("me", s) for s in insights]):
+                self.reflections_fallback += 1
+                return
+            self.sim.land_reflection(agent, insights)
+            self.reflections_done += 1
+        except Exception:
+            self.think_errors += 1
+
+    def metrics_row(self) -> dict:
+        """The city's numbers and the model's workload, as running totals since
+        the server started. The dashboard takes day-to-day differences itself."""
+        llm = self.llm.stats.snapshot()
+        return {
+            **city_metrics(self.sim),
+            "plan requests": llm["byKind"].get("plan", 0),
+            "chats": self.chats_done,
+            "reflections": self.reflections_done,
+            "reviews by model": self.reviews_done,
+            "interviews by model": self.interviews_done,
+            "latency fast": llm["latency"].get("fast"),
+            "latency smart": llm["latency"].get("smart"),
+        }
 
     async def broadcast(self, message: dict) -> None:
         # Gather failures first: a set cannot be mutated while iterating, and a
@@ -676,6 +725,12 @@ class Hub:
             self.clients.discard(ws)
 
     def start(self) -> None:
+        # Opened here rather than in __init__, so importing the server never
+        # leaves an empty recording behind.
+        if CONFIG.replay.record:
+            self.recorder = Recorder.open(self.sim)
+            self.sim.recorder = self.recorder
+        self.history.append(self.metrics_row())
         self._task = asyncio.create_task(self._run())
 
     async def stop(self) -> None:
@@ -687,6 +742,8 @@ class Hub:
                 await self._task
         await self.llm.aclose()
         await self.embedder.aclose()
+        if self.recorder is not None:
+            self.recorder.close(self.sim)
 
 hub = Hub()
 
@@ -746,6 +803,11 @@ def health() -> dict:
         "reviewsTimeout": hub.reviews_timeout,
         "reviewOutcomes": dict(hub.review_outcomes),
         "reviewVerdicts": dict(hub.review_verdicts),
+        "recording": hub.recorder.path.name if hub.recorder else None,
+        "reflectionsDone": hub.reflections_done,
+        "reflectionsFallback": hub.reflections_fallback,
+        "reflectionsTimeout": hub.reflections_timeout,
+        "promptsWithReflection": hub.prompts_with_reflection,
         # The simulation keeps these counts, so read them from the simulation, not the hub.
         "tasksDone": hub.sim.tasks_done,
         "tiredTasks": hub.sim.tired_tasks,
@@ -755,6 +817,12 @@ def health() -> dict:
         "dismissals": hub.sim.dismissals,
         "retirements": hub.sim.retirements,
     }
+
+
+@app.get("/metrics")
+def metrics() -> dict:
+    """Every morning since the server started, plus this moment."""
+    return {"days": hub.history, "now": hub.metrics_row()}
 
 
 @app.get("/agent/{agent_id}")

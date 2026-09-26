@@ -566,3 +566,46 @@ def parse_review(data: dict | None, allowed: tuple[str, ...]) -> tuple[str, str 
     comment = _clip(data.get("comment", ""), 300)
     verdict = str(data.get("verdict", "")).strip().lower()
     return comment, (verdict if verdict in allowed else None)
+
+
+# -------------------------------------------------------------- reflection
+
+REFLECTION_SYSTEM = (
+    "You help a resident of a small city make sense of their recent days. "
+    'Reply only with JSON: {"insights": [...]}. Each insight is one sentence in '
+    "the first person, about a pattern across several memories — people, work, "
+    "study or money — not a retelling of a single event. Use only what the "
+    "memories say: never invent a name, a number or an event. "
+    "Keep everything suitable for a general audience."
+)
+
+REFLECTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "insights": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 3},
+    },
+    "required": ["insights"],
+}
+
+
+def reflection(*, name: str, age: int, traits: list[str], memories: list[str]) -> str:
+    """A night's thinking over the strongest recent memories, oldest first."""
+    lines = "\n".join(f"- {_clip(m, 200)}" for m in memories)
+    return f"""{name}, {age}, {' and '.join(traits)}, is lying awake going over the last few days.
+
+What they remember, oldest first:
+{lines}
+
+What do these add up to? Write two or three insights {name} would draw about the
+people around them, their work or study, or themselves. Each is one sentence in
+the first person, drawn from more than one memory where you can.
+
+Reply with JSON exactly like:
+{{"insights": ["I ...", "I ..."]}}"""
+
+
+def parse_reflection(data: dict | None) -> list[str]:
+    """Up to three insights; an empty list means unusable. Never raises."""
+    if not isinstance(data, dict) or not isinstance(data.get("insights"), list):
+        return []
+    return [s for s in (_clip(item, 200) for item in data["insights"][:3]) if s]

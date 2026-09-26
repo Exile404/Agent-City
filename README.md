@@ -4,11 +4,11 @@ A living city of 50 LLM agents who study at university, interview for jobs, get
 hired, and work under a management hierarchy — running entirely on a single
 consumer GPU, with no cloud API.
 
-> **Status: Phase 6 complete.** Fifty agents study, interview, work shifts, are
-> reviewed, promoted, warned, let go, and eventually retire — all on a local 3B
+> **Status: Phase 7 complete.** Fifty agents study, interview, work, are reviewed,
+> promoted and retired, and go over their days at night — all on a local 3B
 > model, admitted through a cognition scheduler that rations a measured GPU
-> budget. Phase 7 (reflection, deterministic replay, a metrics dashboard) is
-> next. The roadmap marks what exists.
+> budget. Every live run is recorded and replays exactly, headless, in seconds.
+> The roadmap marks what exists.
 
 ## The constraint that shapes everything
 
@@ -52,7 +52,7 @@ This keeps the city coherent, cheap, and replayable.
 |---|---|---|---|
 | **0 — Reflex** | Pure Python | free | Every agent, every tick |
 | **1 — Fast** | `qwen2.5:3b` | 2 slots | Daily plans |
-| **2 — Deliberate** | `qwen2.5:3b` | 1 slot | Conversations, exams, interviews, reviews |
+| **2 — Deliberate** | `qwen2.5:3b` | 1 slot | Conversations, exams, interviews, reviews, reflection |
 
 Tier 0 is what makes the city look continuously alive: needs decay, path
 following, action execution, and critical-need overrides. No agent ever blocks
@@ -78,7 +78,7 @@ everything between.
 | 4 | University: courses, exams, skill growth, credentials | ✅ Done |
 | 5 | Companies, job postings, LLM interviews, hiring | ✅ Done |
 | 6 | Org hierarchy, task assignment, reviews, promotions | ✅ Done |
-| 7 | Reflection, deterministic replay, metrics dashboard | ⬜ |
+| 7 | Reflection, deterministic replay, metrics dashboard | ✅ Done |
 
 ## Running it
 
@@ -127,6 +127,14 @@ silently. `AC_TERM_DAYS=4` shortens terms for measurement runs; the default is 1
 `AC_DAYS_PER_YEAR=1` ages the city a year a day, so retirement can be watched in
 about a minute; the default is 14.
 
+Every live run is written to `replays/`, under wherever the server was started,
+at about 50 KB a sim-day with the model on (`AC_RECORD=0` turns it off). Replay
+one headless, with no GPU:
+
+```bash
+cd backend && python -m app.sim.replay replays/run-20260925-213129.jsonl
+```
+
 ```bash
 cd frontend && pnpm install && pnpm dev
 ```
@@ -142,17 +150,24 @@ last review, and whether they are on a course the employer is paying for, ready
 for the seat above, or carrying a warning; anyone walking to an interview shows
 where they are going.
 
+The **Metrics** button under the speed controls swaps the city for a dashboard:
+headline numbers, then a chart per question over sim-days — who is employed,
+attendance, the job market, careers, money, friendships, and what the model did
+each day — with every morning also available as a table.
+
 ## Architecture
 
 ```
 backend/app/
   config.py        Every tuning knob: pacing, cost, scale
-  sim/             70x50 grid, city layout, A* pathing, clock, tick loop
+  sim/             70x50 grid, city layout, A* pathing, clock, tick loop,
+                   replay (fingerprint, recorder, replayer), metrics
   agents/          Agent state, needs, skills, actions, relationships
   cognition/       Memory stream, LLM client, scheduler, prompts   (Phase 2)
   institutions/    University, companies, job market, hierarchy    (Phases 4-6)
   net/             FastAPI, WebSocket broadcast, control API
 frontend/src/
+  components/      Metrics dashboard
   render/          Three.js scene, buildings, agent figures, bloom
   state/           WebSocket client, snapshot store
 ```
@@ -451,21 +466,104 @@ stood at 70 against the seat's 60, collected eight more promote reviews with no
 seat free, and on day 293, the day Diego Kowalski retired as Product Lead at
 Nimbus Labs, moved into his office. Nobody wrote that arc.
 
-### Still open
+## How a run replays
+
+A live run is the seeded simulation plus whatever the models said, landing on
+whatever tick each answer arrived. Record the second half and the first half
+replays for free — which only holds if the simulation is deterministic, so that
+was checked before anything was recorded.
+
+Each morning the city is **fingerprinted**: a short hash of every agent and every
+attribute of the simulation, 82 parts in all, leaving out only what retrieval
+touches off the tick path to shape the next prompt. The same seed run twice, in
+two processes with different string-hash seeds, matched for all 60 days — and
+again with a year passing every day, so all fifty residents retire and fifty
+newcomers arrive. A check that always says "identical" proves nothing, so it was
+tested against small differences: one cent handed to one agent on day 11 flagged
+exactly that agent, and one extra random number flagged only the random stream,
+before any visible state had changed.
+
+Every answer a model gives enters the city through one of **six doors** — a plan,
+a conversation, an exam, an interview, a review, a reflection — plus a start and
+end flag while a model has an exam, interview or review in hand. Each door writes
+itself to the recording before it opens, and the replayer walks back in through
+the same doors with the same arguments, so what was recorded and what was applied
+cannot drift apart. The Hub still decides what to ask and when; it no longer
+touches the city directly.
+
+A 30-day run with the model on — 3,346 plans, 1,573 conversations, 55
+interviews, 45 reviews, 40 exams — recorded to 1.4 MB and **replays in 5.7
+seconds, every morning's fingerprint matching**. Tampering is caught the next
+morning: one conversation made a single point warmer failed at the first dawn
+after it, and one exam mark changed was caught and named — the student who sat
+it, and the event feed.
+
+### What a live city does differently
+
+Replay rebuilds the live city exactly, so it can be set beside the headless run
+every Phase 6 number was tuned on. First the noise floor: with the model off, the
+Hub only shifts *when* things are decided by a few ticks, and that alone drifts
+the two cities apart. Then the model, at day 30:
+
+| | live | headless | gap | noise floor |
+|---|---|---|---|---|
+| attendance | 0.645 | 0.715 | −7 pts | −2 pts |
+| hires | 37 | 26 | +11 | +1 |
+| let go | 19 | 10 | +9 | +2 |
+| credentials | 26 | 35 | −26% | +5% |
+| warm ties | 288 | 226 | +27% | +5% |
+
+Each gap traces to a door. Plans pull people away from shifts; the model hires
+more readily than the numbers would; it marks exams below the numbers' own
+baseline, and students on a plan miss classes; conversations make friends. None
+of it was retuned: tuning headless to imitate one model's habits would bake them
+into the simulation. The tuning is now a known approximation of the live city,
+with each difference measured and attributed.
+
+## How an agent reflects
+
+Once enough has happened to someone — importance adding up past 45, about 0.7
+times a day — they go over it while they sleep. The model reads their twelve
+strongest recent memories and draws one to three insights, which become
+memories themselves. Words only: plans, conversations and interviews retrieve
+them like anything else, and they never set a number.
+
+Night is a budget decision, not a mood. The recording showed plans filling the
+fast lane around the clock, five or six an hour, while the lane conversations use
+fell to almost nothing between 23:00 and 07:00. Competing with plans in the
+scheduler would have cost about a fifth of all plans, daytime ones included.
+Reflecting at night costs about nine plans a night — four in five of them plans
+made for someone who was asleep.
+
+> *My communication skills seem to be well-received by those who find value in
+> them, whether it's explaining complex transactions or helping with clinic
+> issues.* — Lena Chen
+
+Over the first three nights 95 reflections produced 220 insights from all fifty
+residents, and 190 of about 480 plan and conversation prompts retrieved one.
+Replay made the invention check exact: at each reflection, every resident an
+insight names was checked against what that agent remembered at that moment.
+None was invented. Early insights are grounded but generic — the first days'
+memories are mostly greetings, so "I am meeting new people almost daily" is
+simply true.
+
+## Still open
 
 - **Debt has no consequence.** Chronic absentees cycle through hiring and
-  dismissal. Bianca Moreau was hired about ten times and ran out of money after
+  dismissal; Bianca Moreau was hired about ten times and ran out of money after
   each one, and nothing in the city responds to it.
-- **Interviews have the review queue's old shape.** They are served one at a
-  time behind a six-hour grace timer, so the day-0 hiring rush is probably
-  decided from the numbers more often than it looks. `/health` cannot show it
-  yet.
+- **The day-0 hiring rush can outrun the interview queue.** Interviews are served
+  one at a time behind a six-hour grace timer. Measured: none of 55 decided by the
+  timer in one run, one of 15 in another. The dashboard's "Written by the model"
+  chart shows it when it happens.
+- **Headless tuning is an approximation of the live city** — by the measured gaps
+  above, and on purpose.
+- **About forty plans a night are made between 23:00 and 07:00,** four in five of
+  them for someone asleep, asked what to do with the rest of their day.
+- **Reflection lags to the night,** and early insights are generic until memories
+  fill with jobs, courses and friendships.
 - **Task titles are imperatives.** A 3B pastes them into sentences: "your calm a
   distressed family task". Noun phrases would read cleanly.
-- **Live drifts from headless.** Plans and conversations move people
-  differently from the utility policy, so a live city's careers diverge from the
-  headless runs they were tuned on. Phase 7's replay is where that gets
-  measured.
 
 ## The city
 
@@ -713,6 +811,39 @@ Station had the longest commute in the city on a six-day week: 45% attendance,
 17 let go in 120 days, and nobody lasting to a first review, so its ladder never
 promoted anyone. On weekdays it runs at 64%, and city-wide dismissals over a
 year fell from 186 to 111.
+
+**A door that records itself cannot disagree with the record.** Logging model
+answers beside the code that applied them would have worked until the first edit
+that changed one and not the other. Moving every application into six methods
+that record first and apply second made the recording correct by construction.
+
+**Test the test.** Every "identical" in the determinism check came with a
+negative control — one cent, one extra random draw — because a comparison that
+cannot fail proves nothing. Both controls named exactly the part that changed.
+
+**Measure the noise floor before the signal.** With the model switched off, the
+live city still drifted from headless — median money 434 against 747 by day 39 —
+purely from decisions landing a few ticks later. Without that run, the model
+would have been blamed for all of it.
+
+**Idle capacity is rarely idle.** The night-time conversation slot looked like 30
+free calls a night. It wasn't: when conversations stop, plans speed up to fill
+the card. Reflection's real cost was those plans, which the before-and-after
+measured at about nine a night.
+
+**A 30-day average is the wrong baseline for day three.** Night planning looked
+to drop from 5.9 an hour to 3.4 with reflection on. Over the same three days
+without reflection it was 4.5; the true cost was a third of what the average
+suggested.
+
+**A chart's colours are computed, not chosen.** The dashboard's three series
+colours were validated against the panel they sit on — worst colour-blind
+separation ΔE 9.4, each at least 3:1 — so every chart holds three series at
+most, one unit per chart, and every value is also in a table.
+
+**0 of 0 is not 0%.** On day zero no shift has been called, and attendance
+plotted as 0% drew a false climb into every run. It is now no value at all
+until there is something to divide.
 
 ## License
 

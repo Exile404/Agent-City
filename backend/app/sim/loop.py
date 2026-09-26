@@ -63,6 +63,7 @@ from app.institutions.university import (
 from app.sim.clock import TICKS_PER_DAY, Clock
 from app.sim.layout import build_city
 from app.sim.pathing import PathCache
+from app.sim.replay import Recorder
 from app.sim.spawn import birthday, newcomer, spawn_agents
 from app.sim.world import Building, BuildingKind, TileKind
 from app.institutions.companies import BY_ID as ROLES
@@ -148,6 +149,8 @@ class Simulation:
         #: Bumped when someone leaves and someone new moves in. The frontend
         #: learns names once, when it connects, and has to be told.
         self.roster_version = 0
+        #: Set by the Hub on a live run; None headless, where no model answers.
+        self.recorder: Recorder | None = None
 
     def tick(self) -> None:
         self.clock.advance()
@@ -944,6 +947,131 @@ class Simulation:
         if earned < HIRE_MARK:
             self._enroll(agent, prefer=role.skill)
         return False
+
+    # ------------------------------------------------------------ model results
+    #
+    # Every answer a model gives enters the simulation through one of these
+    # doors, and each door writes itself to the recorder before it opens. A
+    # replay walks back in through the same doors with the same arguments, so
+    # what was recorded and what was applied cannot drift apart.
+
+    def _record(self, op: str, **fields) -> None:
+        if self.recorder is not None:
+            self.recorder.write(self.clock.tick, op, fields)
+
+    def _present(self, agent: Agent) -> bool:
+        """Still in the city. A model can answer for someone who retired while
+        it was thinking; that answer has nobody left to land on."""
+        return self.by_id.get(agent.id) is agent
+
+    def _set_in_flight(self, kind: str, agent: Agent, on: bool) -> None:
+        if kind == "review":
+            if agent.job is not None:
+                agent.job.review_in_flight = on
+            return
+        held = agent.enrollment if kind == "exam" else agent.application
+        if held is not None:
+            held.in_flight = on
+
+    def model_started(self, kind: str, agent: Agent) -> None:
+        """A model has taken this agent's exam, interview or review, so its
+        grace timer stands down until model_finished."""
+        if not self._present(agent):
+            return
+        self._record("start", kind=kind, agent=agent.id)
+        self._set_in_flight(kind, agent, True)
+
+    def model_finished(self, kind: str, agent: Agent) -> None:
+        if not self._present(agent):
+            return
+        self._record("end", kind=kind, agent=agent.id)
+        self._set_in_flight(kind, agent, False)
+
+    def land_plan(self, agent: Agent, steps: list[PlanStep]) -> None:
+        """A day plan the model wrote, already checked against the vocabulary."""
+        if not self._present(agent):
+            return
+        self._record("plan", agent=agent.id, steps=[[s.at, s.kind.value, s.place, s.why] for s in steps])
+        agent.plan = steps
+        agent.last_plan_tick = self.clock.tick
+        agent.memory.add(self.clock.tick, "plan", "Planned: " + "; ".join(str(s) for s in steps[:3]))
+        self.log(f"{agent.name} decided: {steps[0].why or steps[0]}")
+
+    def land_chat(self, a: Agent, b: Agent, lines: list[tuple[str, str]], warmth: int, place: str) -> bool:
+        """The model said it; the simulation decides what it changed.
+
+        Warmth is worth at most a few points either way. One conversation should
+        be able to start a friendship and never manufacture one, so who ends up
+        close stays mostly a matter of who keeps turning up.
+        """
+        if not (self._present(a) and self._present(b)):
+            return False
+        self._record("chat", a=a.id, b=b.id, lines=lines, warmth=warmth, place=place)
+        tick = self.clock.tick
+        transcript = " / ".join(f"{who.split()[0]}: {says}" for who, says in lines)
+        for x, y in ((a, b), (b, a)):
+            rel = x.relationships[y.id]
+            rel.affinity = max(-100.0, min(100.0, rel.affinity + warmth * 2.5))
+            rel.note = next((s for who, s in reversed(lines) if who == y.name), rel.note)
+            # Stored as "dialogue" (importance 4.0, above an observation): this is
+            # what lets the next conversation remember the last one, with no extra
+            # plumbing — it simply surfaces through normal retrieval.
+            x.memory.add(tick, "dialogue", f"Talked with {y.name} at {place} — {transcript}")
+            # A real exchange is worth more than the nod greet() already gave.
+            x.needs.restore("social", 10.0)
+        self.log(f"{a.name} & {b.name} at {place} — {lines[0][1]}")
+        return True
+
+    def land_exam(self, agent: Agent, mark: float | None, paper: tuple[str, str] | None, comment: str) -> None:
+        """A paper the model wrote. mark=None grades it from the numbers."""
+        if not self._present(agent) or agent.enrollment is None:
+            return
+        self._record("exam", agent=agent.id, mark=mark, paper=paper, comment=comment)
+        course = agent.enrollment.course
+        self.sit_exam(agent, mark)
+        if paper:
+            agent.memory.add(
+                self.clock.tick, "milestone",
+                f"{course.name} exam — asked: {paper[0]} — I answered: {paper[1]}",
+            )
+        if comment:
+            self.log(f"{agent.name} — {course.name} examiner: {comment}")
+
+    def land_interview(self, agent: Agent, verdict: bool | None, paper: tuple[str, str] | None, reason: str) -> None:
+        """An interview the model ran. verdict=None decides it from the numbers."""
+        if not self._present(agent) or agent.application is None:
+            return
+        self._record("interview", agent=agent.id, verdict=verdict, paper=paper, reason=reason)
+        posting = agent.application.posting
+        self.hire_or_reject(agent, verdict)
+        if paper:
+            agent.memory.add(
+                self.clock.tick, "milestone",
+                f"{posting.role.title} interview at {posting.employer_name}"
+                f" — asked: {paper[0]} — I said: {paper[1]}",
+            )
+        if reason:
+            self.log(f"{agent.name} — {posting.employer_name}: {reason}")
+
+    def land_review(self, agent: Agent, verdict: str | None = None, comment: str = "") -> Review | None:
+        """A review the model wrote. The grace timer calls hold_review directly,
+        which a replay's own timer repeats, so only this door records."""
+        if not self._present(agent) or agent.job is None:
+            return None
+        self._record("review", agent=agent.id, verdict=verdict, comment=comment)
+        return self.hold_review(agent, verdict, comment)
+
+    def land_reflection(self, agent: Agent, insights: list[str]) -> None:
+        """What the model thinks the agent has learned. Words only: memories for
+        later prompts to retrieve, never a number."""
+        if not self._present(agent):
+            return
+        self._record("reflection", agent=agent.id, insights=insights)
+        for text in insights:
+            agent.memory.add(self.clock.tick, "reflection", text)
+        # Reset after the insights land, so a reflection never triggers the next.
+        agent.memory.mark_reflected()
+        self.log(f"{agent.name} reflected: {insights[0]}")
 
     # ---------------------------------------------------------------- careers
 

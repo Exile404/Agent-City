@@ -17,7 +17,8 @@ from app.config import CONFIG
 @dataclass(slots=True)
 class Ask:
     agent_id: str
-    #: "plan" | "reflect" | "chat"
+    #: "plan" — conversations, exams, interviews, reviews and reflections all
+    #: bypass the scheduler and never ask.
     kind: str
     priority: float
     tick: int
@@ -35,12 +36,6 @@ def plan_priority(*, minutes_since_plan: float, worst_need: float, has_plan: boo
     staleness = minutes_since_plan / CONFIG.cognition.replan_minutes
     urgency = max(0.0, (40.0 - worst_need) / 40.0)
     return min(9.0, staleness * 4.0 + urgency * 3.0)
-
-
-def reflect_priority(since_reflection: float) -> float:
-    """Reflection is never urgent — it loses to planning by design."""
-    ratio = since_reflection / CONFIG.memory.reflection_importance_threshold
-    return min(5.0, ratio * 2.5)
 
 
 class Scheduler:

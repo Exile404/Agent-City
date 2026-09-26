@@ -187,6 +187,9 @@ class CognitionConfig:
     #: that is exactly what happened — the gate was above the entire steady-state
     #: score range, so from day three the smart lane ran at 15% of capacity.
     chat_min_interest: float = 2.0
+    #: Ticks a reflection stays worth writing. Nobody is waiting on one and the
+    #: smart lane is empty at night, so it gets an exam's patience.
+    reflect_staleness_ticks: int = 144
 
 
 @dataclass(frozen=True)
@@ -224,6 +227,14 @@ class WorkConfig:
 
 
 @dataclass(frozen=True)
+class ReplayConfig:
+    #: Write every live run down so it can be replayed headless.
+    record: bool = os.environ.get("AC_RECORD", "1") != "0"
+    #: Where recordings go, relative to where the server was started.
+    record_dir: str = os.environ.get("AC_RECORD_DIR", "replays")
+
+
+@dataclass(frozen=True)
 class Config:
     world: WorldConfig = field(default_factory=WorldConfig)
     loop: LoopConfig = field(default_factory=LoopConfig)
@@ -235,6 +246,7 @@ class Config:
     cognition: CognitionConfig = field(default_factory=CognitionConfig)
     university: UniversityConfig = field(default_factory=UniversityConfig)
     work: WorkConfig = field(default_factory=WorkConfig)
+    replay: ReplayConfig = field(default_factory=ReplayConfig)
     seed: int = _env_int("AC_SEED", 20260827)
 
 

@@ -6,6 +6,7 @@ import {
   type ReactNode,
 } from 'react'
 import { ACTION_COLORS } from './render/colors'
+import Dashboard from './components/Dashboard'
 import CityScene from './render/CityScene'
 import { cityStore } from './state/socket'
 
@@ -134,6 +135,7 @@ export default function App() {
   const [selected, setSelected] = useState<number | null>(null)
   const [detail, setDetail] = useState<AgentDetail | null>(null)
   const [speed, setSpeed] = useState(1)
+  const [showMetrics, setShowMetrics] = useState(false)
 
   // One HUD re-render per tick. The canvas reads the store directly at 60fps
   // and never passes through React.
@@ -192,7 +194,16 @@ export default function App() {
   return (
     <div className="flex h-full">
       <div className="relative min-w-0 flex-1">
-        <CityScene store={cityStore} onSelect={select} />
+        {/* Hidden, not unmounted: the building labels are HTML drawn above
+            everything, so covering the canvas alone leaves them floating. */}
+        <div className={`absolute inset-0 ${showMetrics ? 'invisible' : ''}`}>
+          <CityScene store={cityStore} onSelect={select} />
+        </div>
+        {showMetrics && (
+          <div className="absolute inset-0 overflow-y-auto bg-ink">
+            <Dashboard api={API} />
+          </div>
+        )}
       </div>
 
       <aside className="flex w-[340px] flex-none flex-col overflow-y-auto border-l border-edge bg-panel">
@@ -217,6 +228,9 @@ export default function App() {
               </button>
             ))}
           </div>
+          <button className={`${BTN} mt-2 w-full`} onClick={() => setShowMetrics((v) => !v)}>
+            {showMetrics ? 'Back to the city' : 'Metrics'}
+          </button>
         </Panel>
 
         {detail && (
