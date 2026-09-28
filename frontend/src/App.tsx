@@ -27,6 +27,7 @@ type AgentDetail = {
   needs: Record<string, number>
   skills: Record<string, number>
   money: number
+  loan: number
   employed: boolean
   study: {
     course: string
@@ -47,6 +48,7 @@ type AgentDetail = {
     offered: number
     manager: { name: string; role: string } | null
     top: boolean
+    floor: boolean
     reports: string[]
     form: number | null
     tasks: { title: string; quality: number; tired: boolean }[]
@@ -254,6 +256,7 @@ export default function App() {
               <span style={{ color: detail.money < 0 ? 'hsl(0 62% 55%)' : undefined }}>
                 {detail.money < 0 ? '−' : ''}${Math.abs(detail.money).toFixed(0)}
               </span>
+              {detail.loan > 0 && <> · owes Ledger Bank ${detail.loan.toFixed(0)}</>}
             </div>
             <div
               className="mt-2 font-semibold"
@@ -304,7 +307,9 @@ export default function App() {
                   ${detail.work.wage} a shift · {detail.work.skill}
                 </div>
                 <div className="text-[11px] text-muted">
-                  {detail.work.manager
+                  {detail.work.floor
+                    ? 'minimum-wage work · still looking for better'
+                    : detail.work.manager
                     ? `reports to ${detail.work.manager.name} · ${detail.work.manager.role}`
                     : detail.work.top
                       ? 'top of the ladder'

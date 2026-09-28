@@ -232,6 +232,9 @@ class ReplayConfig:
     record: bool = os.environ.get("AC_RECORD", "1") != "0"
     #: Where recordings go, relative to where the server was started.
     record_dir: str = os.environ.get("AC_RECORD_DIR", "replays")
+    #: A recording to play back instead of running live. The server then asks
+    #: no model anything: every answer comes from the file.
+    replay_path: str = os.environ.get("AC_REPLAY", "")
 
 
 @dataclass(frozen=True)

@@ -44,6 +44,9 @@ class Role:
     #: The role one rung up at the same employer — who reviews this one, and
     #: where a promotion leads. None at the top of the ladder.
     reports_to: str | None = None
+    #: Advertised on the job market. False for work nobody applies for: it is
+    #: taken when someone has run out of money and out of options.
+    open_market: bool = True
 
     @property
     def wage(self) -> float:
@@ -79,9 +82,17 @@ ROLES: tuple[Role, ...] = (
     Role("safety_lead", "Safety Lead", BuildingKind.GAS, "management", 50.0, 220.0, WEEKDAYS, 12),
     Role("archivist", "Archivist", BuildingKind.LIBRARY, "communication", 30.0, 130.0, WEEKDAYS, 10, seats=2, reports_to="sys_librarian"),
     Role("sys_librarian", "Systems Librarian", BuildingKind.LIBRARY, "design", 35.0, 155.0, WEEKDAYS, 13),
+    # The floor under the market: no interview, no ladder, and $95 a day
+    # against $81 of rent and meals. Never advertised; taken by someone out of
+    # money who could work but has nothing yet. The 20 is only how hard the
+    # work is, since nobody is held to it at a door. At ten, not seven: at seven
+    # half of all porter shifts were slept through, and the floor fired the
+    # people it was there to catch.
+    Role("porter", "Porter", BuildingKind.MARKET, "communication", 20.0, 95.0, SIX_DAYS, 10, seats=50, open_market=False),
 )
 
 BY_ID: dict[str, Role] = {r.id: r for r in ROLES}
+PORTER = "porter"
 
 
 def ladder_above(role: Role) -> list[Role]:
@@ -172,7 +183,7 @@ PROBATION_REVIEWS = 1
 class Job:
     employer_id: str
     role_id: str
-    #: Tick they started. Phase 6 reads it for tenure.
+    #: Tick they started: tenure, and the seed of their task rota.
     started_tick: int = 0
     #: Shifts the roster called since they were hired, and how many they turned
     #: up for. Counted at the window's close, so this is "showed up", where the
@@ -253,6 +264,8 @@ def postings(world: World) -> list[Posting]:
     """Every advertised seat in the city, in a stable order."""
     out: list[Posting] = []
     for role in ROLES:
+        if not role.open_market:
+            continue
         for building in sorted(world.of_kind(role.employer), key=lambda b: b.id):
             out.append(Posting(building.id, building.name, role))
     return out
@@ -392,24 +405,27 @@ POOR_WORK = 30.0
 
 #: Every role's work at the three STRETCH levels. Fixed data, like the
 #: curriculum, so a review has something concrete to cite and a model never
-#: has to invent what someone did.
+#: has to invent what someone did. Noun phrases, not instructions: a 3B pastes
+#: titles straight into its sentences, and an imperative came out as "your
+#: calm a distressed family task".
 TASKS: dict[str, tuple[str, str, str]] = {
-    "junior_eng": ("Fix a failing test", "Review a pull request", "Ship a new feature"),
-    "analyst": ("Clean a quarter's data", "Build the weekly report", "Forecast next quarter's demand"),
-    "product_lead": ("Run the stand-up", "Plan the next release", "Settle a scope dispute"),
-    "ward_clerk": ("Book patient appointments", "Handle the front-desk rush", "Calm a distressed family"),
-    "records": ("File discharge summaries", "Audit a ward's records", "Trace a billing error"),
-    "ward_manager": ("Draw up the nurse rota", "Cover a short-staffed shift", "Lead an incident review"),
-    "stall_hand": ("Stock the stalls", "Work the lunchtime crowd", "Talk down an angry customer"),
-    "floor_super": ("Open the market floor", "Settle a vendor dispute", "Reorganise the floor layout"),
-    "teller": ("Process the morning deposits", "Open a new account", "Handle a fraud complaint"),
-    "risk": ("Score a loan application", "Stress-test the portfolio", "Model a default scenario"),
-    "power_tech": ("Log turbine readings", "Diagnose a pressure drop", "Trace an intermittent fault"),
-    "control_eng": ("Patch the control software", "Tune a feedback loop", "Rewrite a failing controller"),
-    "gas_tech": ("Check meter readings", "Inspect a pipeline section", "Find a pressure leak"),
-    "safety_lead": ("Run the safety briefing", "Review an incident report", "Lead an emergency drill"),
-    "archivist": ("Catalogue new arrivals", "Help a researcher find a source", "Restore a damaged collection"),
-    "sys_librarian": ("Fix the catalogue search", "Redesign the lending workflow", "Plan the digital archive"),
+    "junior_eng": ("Fixing a failing test", "Reviewing a pull request", "Shipping a new feature"),
+    "analyst": ("Cleaning a quarter's data", "Building the weekly report", "Forecasting next quarter's demand"),
+    "product_lead": ("Running the stand-up", "Planning the next release", "Settling a scope dispute"),
+    "ward_clerk": ("Booking patient appointments", "Handling the front-desk rush", "Calming a distressed family"),
+    "records": ("Filing discharge summaries", "Auditing a ward's records", "Tracing a billing error"),
+    "ward_manager": ("Drawing up the nurse rota", "Covering a short-staffed shift", "Leading an incident review"),
+    "stall_hand": ("Stocking the stalls", "Working the lunchtime crowd", "Talking down an angry customer"),
+    "floor_super": ("Opening the market floor", "Settling a vendor dispute", "Reorganising the floor layout"),
+    "teller": ("Processing the morning deposits", "Opening a new account", "Handling a fraud complaint"),
+    "risk": ("Scoring a loan application", "Stress-testing the portfolio", "Modelling a default scenario"),
+    "power_tech": ("Logging turbine readings", "Diagnosing a pressure drop", "Tracing an intermittent fault"),
+    "control_eng": ("Patching the control software", "Tuning a feedback loop", "Rewriting a failing controller"),
+    "gas_tech": ("Checking meter readings", "Inspecting a pipeline section", "Finding a pressure leak"),
+    "safety_lead": ("Running the safety briefing", "Reviewing an incident report", "Leading an emergency drill"),
+    "archivist": ("Cataloguing new arrivals", "Helping a researcher find a source", "Restoring a damaged collection"),
+    "sys_librarian": ("Fixing the catalogue search", "Redesigning the lending workflow", "Planning the digital archive"),
+    "porter": ("Moving stock off the carts", "Clearing the loading bay", "Unloading a late delivery"),
 }
 
 if set(TASKS) != set(BY_ID) or any(len(t) != len(STRETCH) for t in TASKS.values()):
@@ -446,13 +462,18 @@ def do_task(
     return TASKS[job.role_id][level], max(0.0, min(100.0, quality)), tired
 
 
-def work_gain(skill_now: float, role: Role) -> float:
-    """Skill points one finished shift teaches. The university's diminishing
-    returns at a tenth the size, stopping at mastery of this job."""
-    room = role.requires + MASTERY_MARGIN - skill_now
+def _capped_gain(skill_now: float, ceiling: float) -> float:
+    """One shift's diminishing-returns gain, never carrying skill past ceiling."""
+    room = ceiling - skill_now
     if room <= 0:
         return 0.0
     return min(room, CONFIG.work.shift_gain * (1.0 - skill_now / 100.0))
+
+
+def work_gain(skill_now: float, role: Role) -> float:
+    """Skill points one finished shift teaches. The university's diminishing
+    returns at a tenth the size, stopping at mastery of this job."""
+    return _capped_gain(skill_now, role.requires + MASTERY_MARGIN)
 
 
 # ----------------------------------------------------------------- reviews
@@ -556,7 +577,4 @@ LEADERSHIP_CEILING = 60.0
 def leadership_gain(skill_now: float) -> float:
     """Management one shift of running a team teaches: work_gain's rate,
     stopping at LEADERSHIP_CEILING."""
-    room = LEADERSHIP_CEILING - skill_now
-    if room <= 0:
-        return 0.0
-    return min(room, CONFIG.work.shift_gain * (1.0 - skill_now / 100.0))
+    return _capped_gain(skill_now, LEADERSHIP_CEILING)

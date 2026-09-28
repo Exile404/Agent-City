@@ -1,8 +1,8 @@
 """The university: what is taught, when, and to whom.
 
 Courses are fixed data rather than generated. A timetable has to be the same on
-Tuesday as it was on Monday, and Phase 7's replay needs the curriculum to be a
-constant rather than a model output.
+Tuesday as it was on Monday, and replay needs the curriculum to be a constant
+rather than a model output.
 """
 
 from __future__ import annotations
@@ -30,8 +30,9 @@ class Course:
     hour: int
 
 
-#: Two campuses with different characters, so a credential says something —
-#: Phase 5 can tell an Algorithms pass from an Applied Programming one.
+#: Two campuses with different characters, so a credential names the course
+#: passed, not only the subject: Algorithms reads differently from Applied
+#: Programming.
 CURRICULUM: tuple[Course, ...] = (
     Course("algo", "Algorithms", "university", "programming", 0.9, (0, 1, 2, 4), 10),
     Course("stats", "Statistical Methods", "university", "analysis", 0.85, (0, 1, 3, 4), 13),
@@ -104,6 +105,8 @@ class Enrollment:
     #: Employer id paying for this term, None for an ordinary student. A
     #: sponsored student is seconded full-time on full pay and keeps their seat.
     sponsor: str | None = None
+    #: Set the first night the university covered what this student could not.
+    scholarship: bool = False
     @property
     def course(self) -> Course:
         return BY_ID[self.course_id]

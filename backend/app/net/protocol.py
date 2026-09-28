@@ -72,7 +72,7 @@ def tick_message(sim: Simulation, since_total: int, roster_sent: int | None = No
         "t": tick,
         "clock": str(sim.clock),
         # Numeric time for the renderer's sun; parsing the display string
-        # would be silly when the clock already knows the number.
+        # would be redundant when the clock already has the number.
         "minuteOfDay": sim.clock.minute_of_day,
         "agents": [[a.x, a.y, a.action.kind.value] for a in sim.agents],
         # The `fresh > 0` guard is load-bearing: list[-0:] is the whole list,
@@ -114,8 +114,10 @@ def _work(sim: Simulation, a: Agent) -> dict:
         "offered": j.shifts_offered,
         "manager": {"name": boss.name, "role": boss.job.role.title} if boss else None,
         # Top of the ladder and "nobody above because the seats are empty" read
-        # the same without this, and slice 3 has to treat them differently.
-        "top": j.role.reports_to is None,
+        # the same without this, and the panel words them differently.
+        "top": j.role.reports_to is None and j.role.open_market,
+        # The minimum-wage floor has no ladder at all, not an empty top rung.
+        "floor": not j.role.open_market,
         "reports": [r.name for r in sim.reports_of(a)],
         "form": round(j.form) if j.form is not None else None,
         # Newest first, and only a few: the panel is a glance, not a file.
@@ -150,6 +152,7 @@ def agent_detail(sim: Simulation, agent_id: str) -> dict | None:
                 "needs": {k: round(v, 1) for k, v in a.needs.as_dict().items()},
                 "skills": {k: round(v, 1) for k, v in a.skills.items()},
                 "money": round(a.money, 2),
+                "loan": round(a.loan, 2),
                 "employed": a.employed,
                 # None when out of work, like study: a blank rather than a row
                 # of zeroes that reads like a bad record.

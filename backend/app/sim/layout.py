@@ -19,8 +19,8 @@ ROAD_WIDTH = 2
 #: (col, row, kind, id, name, width, height, capacity)
 LANDMARKS: list[tuple] = [
     (2, 0, BuildingKind.UNIVERSITY, "university", "Agent City University", 8, 8, 60),
-    # Second campus, deliberately across the map from the first so Phase 4
-    # students are not all funnelled into the same corner of the city.
+    # Second campus, deliberately across the map from the first so students
+    # are not all funnelled into the same corner of the city.
     (6, 2, BuildingKind.UNIVERSITY, "eastgate", "Eastgate Polytechnic", 7, 7, 45),
     (4, 0, BuildingKind.PARK, "commons", "The Commons", 8, 8, -1),
     (2, 4, BuildingKind.PARK, "willow_green", "Willow Green", 8, 8, -1),
@@ -112,40 +112,3 @@ def build_city() -> World:
         _place(world, col, row, BuildingKind.HOME, f"home_{i}", name, 6, 5, HOME_CAPACITY)
 
     return world
-
-
-_GLYPH = {
-    BuildingKind.UNIVERSITY: "U",
-    BuildingKind.OFFICE: "O",
-    BuildingKind.CAFE: "C",
-    BuildingKind.PARK: "P",
-    BuildingKind.GYM: "G",
-    BuildingKind.HOME: "h",
-    BuildingKind.POWER: "E",
-    BuildingKind.GAS: "F",
-    BuildingKind.HOSPITAL: "+",
-    BuildingKind.MARKET: "M",
-    BuildingKind.LIBRARY: "L",
-    BuildingKind.BANK: "B",
-}
-
-
-def ascii_map(world: World) -> str:
-    """Render the city as text. The only way to see it until Phase 1 exists."""
-    rows = []
-    for y in range(world.height):
-        row = []
-        for x in range(world.width):
-            tile = world.tile(x, y)
-            if tile is TileKind.WALL:
-                row.append("#")
-            elif tile is TileKind.ROAD:
-                row.append(" ")
-            else:
-                b = world.building_at(x, y)
-                if b is not None:
-                    row.append(_GLYPH.get(b.kind, "?"))
-                else:
-                    row.append("." if tile is TileKind.GRASS else "·")
-        rows.append("".join(row))
-    return "\n".join(rows)

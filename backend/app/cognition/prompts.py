@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from app.agents.actions import ActionKind
 
 #: What an agent may choose to do. The model picks from this and nothing else —
-#: a 3B model will happily invent "search_for_restaurant" otherwise.
+#: a 3B model will readily invent "search_for_restaurant" otherwise.
 PLANNABLE: dict[str, tuple[str, ...]] = {
     "sleep": ("home",),
     "eat": ("cafe", "market"),

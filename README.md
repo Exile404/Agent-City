@@ -4,11 +4,15 @@ A living city of 50 LLM agents who study at university, interview for jobs, get
 hired, and work under a management hierarchy — running entirely on a single
 consumer GPU, with no cloud API.
 
-> **Status: Phase 7 complete.** Fifty agents study, interview, work, are reviewed,
-> promoted and retired, and go over their days at night — all on a local 3B
-> model, admitted through a cognition scheduler that rations a measured GPU
-> budget. Every live run is recorded and replays exactly, headless, in seconds.
-> The roadmap marks what exists.
+![Agent City at midday on day 203: buildings lit by who is inside, and the event feed showing shifts, meals, a review and conversations](docs/agent-city.png)
+
+*Day 203 of the recorded live year, replayed. Every line of dialogue and every review in the feed was written by the model.*
+
+> **Status: Phase 8 complete.** Fifty agents study, interview, work, borrow, are
+> reviewed, promoted and retired, and go over their days at night — all on a local
+> 3B model, admitted through a cognition scheduler that rations a measured GPU
+> budget. A full year has been lived with the model on, recorded, and replayed
+> exactly. The roadmap marks what exists.
 
 ## The constraint that shapes everything
 
@@ -79,6 +83,7 @@ everything between.
 | 5 | Companies, job postings, LLM interviews, hiring | ✅ Done |
 | 6 | Org hierarchy, task assignment, reviews, promotions | ✅ Done |
 | 7 | Reflection, deterministic replay, metrics dashboard | ✅ Done |
+| 8 | Bank, floor job, replay viewer, a year lived | ✅ Done |
 
 ## Running it
 
@@ -135,6 +140,13 @@ one headless, with no GPU:
 cd backend && python -m app.sim.replay replays/run-20260925-213129.jsonl
 ```
 
+Point the server at a recording instead and the browser plays it back — the same
+city, no GPU, nothing re-recorded, paused at the last frame:
+
+```bash
+cd backend && AC_REPLAY=../replays/run-20260927-060339.jsonl uvicorn app.net.server:app --port 8000
+```
+
 ```bash
 cd frontend && pnpm install && pnpm dev
 ```
@@ -147,8 +159,11 @@ credentials, and their last few exam papers. Anyone with a job shows the role,
 the employer, what it pays a shift, how many shifts they have turned up for, who
 they report to and who reports to them, their form and last three tasks, their
 last review, and whether they are on a course the employer is paying for, ready
-for the seat above, or carrying a warning; anyone walking to an interview shows
-where they are going.
+for the seat above, or carrying a warning; anyone who owes Ledger Bank shows how
+much, and a porter's job is marked as minimum-wage work they are still looking to
+leave; anyone walking to an interview shows where they are going.
+
+![An Analyst's panel: needs, skills, who she reports to and manages, attendance, form, her last three tasks and her last review](docs/agent-panel.png)
 
 The **Metrics** button under the speed controls swaps the city for a dashboard:
 headline numbers, then a chart per question over sim-days — who is employed,
@@ -164,7 +179,7 @@ backend/app/
                    replay (fingerprint, recorder, replayer), metrics
   agents/          Agent state, needs, skills, actions, relationships
   cognition/       Memory stream, LLM client, scheduler, prompts   (Phase 2)
-  institutions/    University, companies, job market, hierarchy    (Phases 4-6)
+  institutions/    University, companies, job market, hierarchy, bank (Phases 4-6, 8)
   net/             FastAPI, WebSocket broadcast, control API
 frontend/src/
   components/      Metrics dashboard
@@ -466,6 +481,67 @@ stood at 70 against the seat's 60, collected eight more promote reviews with no
 seat free, and on day 293, the day Diego Kowalski retired as Product Lead at
 Nimbus Labs, moved into his office. Nobody wrote that arc.
 
+## How money works
+
+A balance used to go as negative as it liked, and nothing noticed: Bianca Moreau
+was hired about ten times and ran out of money after each one. Debt now costs
+something, and there are two ways out of it — borrow, or take the floor.
+
+**Ledger Bank lends, and the rules are numbers.** Credit is ten days of what
+someone earns — their job's daily rate, or the stipend — and a loan clears the
+overdraft plus three days of living. It costs 0.2% a day, and a fifth of every
+wage goes back until it is repaid. An overdraft nobody arranged costs a flat $5 a
+night, dearer than the interest on almost any loan the bank will make, so the walk
+to the bank pays. Whether someone makes it is temperament, rolled once a weekday
+while the bank is open: caution and patience put it off, ambition and
+restlessness do not. Students never go. The first version let them, and they
+borrowed lunch money in the hours they should have been in class.
+
+**The floor is a porter's job at Foundry Market**: $95 a day against $81 of rent
+and meals, fifty seats, no interview, never advertised. It goes to someone
+overdrawn whom the bank will lend no more, or who has let a week of living go on
+the overdraft without asking. A porter keeps looking for real work, is paid by the
+shift, and is neither reviewed nor dismissed — absence already costs them. A
+student short of money gets a need-based scholarship that tops their balance up to
+zero each night, so study never sinks anyone. And someone a week overdrawn stops
+letting temperament keep them home, though that turned out to be small: only about
+one missed shift in ten among people in debt was temperament. The rest were needs.
+
+Almost every part needed a second attempt:
+
+- **A rate compounds.** The first overdraft charge was 1% a day. Samir Okafor —
+  cautious, so slow to borrow, and restless, so at 3 shifts in 10 — owed the bank
+  about $2,300 and his overdraft $78,843 by day 365. A flat fee makes the same
+  behaviour cost in a straight line.
+- **The floor started at 07:00, and half its shifts were slept through.** Porters
+  turned up for 29%, so the floor fired the people it was there to catch. At
+  10:00 they turn up for 59%.
+- **On days nobody was hiring, nobody reached the floor.** The porter check sat
+  below an early return for "no vacancies", and the floor is never a vacancy: 443
+  person-days of people a week overdrawn with nowhere to go.
+- **A porter who walked to an interview as the shift began kept the application
+  forever.** The shift won the walk, the application was never filed, and nobody
+  may apply while holding one: 1,371 person-days locked out, 0 after.
+- **Porters were dismissed and re-hired the same afternoon.** Marcus Moreau five
+  times in under two months — each one a "let go" in the numbers and nothing else.
+
+Over a headless year, against the same seed before the bank:
+
+| | before | with the bank |
+|---|---|---|
+| median money | −392 | +1,535 |
+| overdrawn at day 365 | 26 | 9 |
+| deepest | −21,662 | −14,061 |
+| let go | 132 | 122 |
+| promoted / sponsored | 10 / 17 | 7 / 21 |
+| credentials | 134 | 111 |
+
+The city is richer and less churned, and it studies less: with a floor under them,
+fewer people are sent to become employable. Attendance reads 0.746 → 0.701 mostly
+because porters, at 45%, are now on a roster instead of off one; everyone else
+moved by a point and a half. The deepest debt is still a chronic absentee on the
+floor, and it now falls by a fixed amount a day.
+
 ## How a run replays
 
 A live run is the seeded simulation plus whatever the models said, landing on
@@ -474,7 +550,7 @@ replays for free — which only holds if the simulation is deterministic, so tha
 was checked before anything was recorded.
 
 Each morning the city is **fingerprinted**: a short hash of every agent and every
-attribute of the simulation, 82 parts in all, leaving out only what retrieval
+attribute of the simulation, 91 parts in all, leaving out only what retrieval
 touches off the tick path to shape the next prompt. The same seed run twice, in
 two processes with different string-hash seeds, matched for all 60 days — and
 again with a year passing every day, so all fifty residents retire and fifty
@@ -498,6 +574,14 @@ morning: one conversation made a single point warmer failed at the first dawn
 after it, and one exam mark changed was caught and named — the student who sat
 it, and the event feed.
 
+A recording also plays back in the browser. With `AC_REPLAY` set, the server builds
+the city from the recording's header and walks back through the same doors on the
+same ticks: the 3D view, the feed, the panels and the dashboard all run, no model
+is asked, nothing is recorded, and the city pauses at the last frame. A recording
+only plays on the code that made it — the city is fingerprinted before the first
+tick and a mismatch is refused, not shown — and the dashboard names the file and
+how many mornings have matched so far.
+
 ### What a live city does differently
 
 Replay rebuilds the live city exactly, so it can be set beside the headless run
@@ -519,6 +603,64 @@ baseline, and students on a plan miss classes; conversations make friends. None
 of it was retuned: tuning headless to imitate one model's habits would bake them
 into the simulation. The tuning is now a known approximation of the live city,
 with each difference measured and attributed.
+
+### When plans started working
+
+Two guards on the Hub fixed what the recording showed about night planning: one
+plan in flight per agent, and one plan a night for anyone asleep. Over three live
+days, plans replaced while their owner slept went from 708 of 778 to 7, and
+duplicate plans from 222 of 351 to none.
+
+The first year-long run then collapsed. Live attendance fell from 0.89 on day one
+to **0.19 by day 21**, while the same code headless held 0.72. Replay made the
+cause a measurement rather than a guess — the recording was re-run with one kind
+of model answer left out at a time:
+
+| left out | nothing | reflections | conversations | plans |
+|---|---|---|---|---|
+| attendance, day 6 | 0.35 | 0.35 | 0.31 | **0.81** |
+
+Plans had always been overwritten before most of their steps came due. Now they
+survived, and agents followed 503 steps in five days where the Phase 7 run
+followed 149. A plan step outranked every need until the need went critical, and
+walks here take 70 to 115 minutes, so a critical need at 07:30 was a shift missed
+on the way to food. Critical hunger ran 3.06 times per agent a day, against 1.14
+with no plans at all.
+
+An alarm clock, a curfew on evening steps, and a guard predicting when a need
+would run out were each tried against the recorded plans; none got past 0.42.
+What worked is simpler: **a plan step waits while any need is below 55.** That is
+the level that reproduces the Phase 7 city — 159 steps in five days, 0.66
+attendance at day 14 — so plans still steer the day without starving anyone.
+Live, the first four days read 0.95, 0.93, 0.80, 0.77.
+
+### A year, live
+
+With that in place the city ran 365 days with the model on: 43,703 plans, 20,420
+conversations, 9,751 reflections, and every one of 475 interviews, 905 reviews and
+181 exams written by the model — an interview now waits up to a day for it, and
+none fell back. The recording is 22 MB and **replays exactly, all 365 mornings
+matching**. Beside the same seed headless:
+
+| day 365 | live | headless |
+|---|---|---|
+| attendance | 0.702 | 0.701 |
+| hired / let go | 250 / 213 | 159 / 122 |
+| promoted / sponsored | 5 / 14 | 7 / 21 |
+| credentials | 82 | 111 |
+| warm ties | 848 | 516 |
+| median money | 2,920 | 1,535 |
+| overdrawn / deepest | 10 / −11,720 | 9 / −14,061 |
+
+Attendance matches all year. Conversations are the model's clearest mark: 64% more
+warm ties, peaking at 1,300 on day 240, before fifteen retirements replaced
+residents with newcomers who knew nobody. The extra churn is concentrated, not
+general — stall hands on a 07:00 shift were let go 69 times against 34, gas
+technicians on 08:00 34 times against five or fewer. Live agents also earn fewer
+credentials, not yet traced.
+
+Diego Rahman ended the year a 62-year-old Product Lead with $55,267. Thea Moreau
+holds six credentials. Marcus Moreau, a porter, ends it $11,720 overdrawn.
 
 ## How an agent reflects
 
@@ -549,21 +691,20 @@ simply true.
 
 ## Still open
 
-- **Debt has no consequence.** Chronic absentees cycle through hiring and
-  dismissal; Bianca Moreau was hired about ten times and ran out of money after
-  each one, and nothing in the city responds to it.
-- **The day-0 hiring rush can outrun the interview queue.** Interviews are served
-  one at a time behind a six-hour grace timer. Measured: none of 55 decided by the
-  timer in one run, one of 15 in another. The dashboard's "Written by the model"
-  chart shows it when it happens.
+- **Early shifts carry the live churn.** Stall hands (07:00) and gas technicians
+  (08:00) account for most of the live year's 91 extra dismissals. Stall hands
+  sleep through a fifth of their shifts even headless.
+- **Live agents earn fewer credentials** — 82 against 111 over a year, with fewer
+  promotions. Not yet traced.
+- **Debt has a cost but no ceiling.** A porter needs 85% attendance to cover rent
+  and meals and averages 45%, so the deepest balances fall all year, in a straight
+  line. There is no bankruptcy.
+- **The scholarship is free money.** The university covered about $160,000 of
+  student shortfall in the live year, and nothing funds it.
 - **Headless tuning is an approximation of the live city** — by the measured gaps
   above, and on purpose.
-- **About forty plans a night are made between 23:00 and 07:00,** four in five of
-  them for someone asleep, asked what to do with the rest of their day.
 - **Reflection lags to the night,** and early insights are generic until memories
   fill with jobs, courses and friendships.
-- **Task titles are imperatives.** A 3B pastes them into sentences: "your calm a
-  distressed family task". Noun phrases would read cleanly.
 
 ## The city
 
@@ -748,8 +889,8 @@ hypothesis with a fact.
 **Balances go negative.** Nobody earns until Phase 5, so any floor — can't eat,
 dropped for non-payment — would empty the university within a fortnight by
 construction rather than by anything a student did. Debt is a number, and the
-simulation owns it; what debt *means* is still open, now that a wage exists to
-climb out with and thirty-three of fifty are climbing.
+simulation owns it; since the bank, it also costs something — see how money
+works.
 
 **The exam mark is clamped; the interview verdict is not.** A mark is a number
 and the simulation owns numbers, so the model writes a paper that reads like the
@@ -844,6 +985,18 @@ most, one unit per chart, and every value is also in a table.
 **0 of 0 is not 0%.** On day zero no shift has been called, and attendance
 plotted as 0% drew a false climb into every run. It is now no value at all
 until there is something to divide.
+
+**A rate compounds; a fee does not.** One percent a day reads as a mild penalty
+and is thirty-seven-fold a year. The overdraft only had to cost more than a loan,
+and a flat $5 does, for almost every loan the bank makes.
+
+**Take one input away at a time.** When live attendance collapsed, the recording
+already held every model answer of the run. Replaying it with plans,
+conversations or reflections left out named the cause in four runs, and the same
+recording then served as the bench for every candidate fix.
+
+**A fix can expose what the bug was hiding.** Plans were overwritten so often that
+nobody noticed they ignored needs. Making them stick is what showed it.
 
 ## License
 

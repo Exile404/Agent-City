@@ -67,6 +67,18 @@ from app.sim.replay import Recorder
 from app.sim.spawn import birthday, newcomer, spawn_agents
 from app.sim.world import Building, BuildingKind, TileKind
 from app.institutions.companies import BY_ID as ROLES
+from app.institutions.companies import PORTER
+from app.institutions.bank import (
+    CUSHION_DAYS,
+    DESPERATE_DAYS,
+    LIVING_COST,
+    LOAN_RATE,
+    OPEN_HOURS,
+    OVERDRAFT_FEE,
+    REPAYMENT_SHARE,
+    credit_limit,
+    willing_to_borrow,
+)
 
 #: Need -> (what fixes it, where it happens). None means the agent's own home.
 NEED_REMEDY: dict[str, tuple[ActionKind, BuildingKind | None]] = {
@@ -135,6 +147,9 @@ class Simulation:
         #: How long a due review waits before the sim writes it from the numbers.
         #: The Hub stretches it when a model is reviewing.
         self.review_grace = self.REVIEW_GRACE_TICKS
+        #: The same for an interview: how long an application waits for a
+        #: verdict before the sim decides it. Also stretched by the Hub.
+        self.interview_grace = self.INTERVIEW_GRACE_TICKS
         #: Verdicts actually recorded, however they were reached.
         self.review_verdicts: Counter[str] = Counter()
         self.promotions = 0
@@ -146,6 +161,17 @@ class Simulation:
         #: Management learned by running a team rather than on a course.
         self.management_learned = 0.0
         self.retirements = 0
+        #: Ledger Bank: loans made and refused, money lent, interest charged on
+        #: loans, fees charged on overdrafts, and wages taken back in repayment.
+        self.loans_made = 0
+        self.loans_refused = 0
+        self.lent = 0.0
+        self.loan_interest = 0.0
+        self.overdraft_fees = 0.0
+        self.repaid = 0.0
+        #: The minimum-wage floor, and the university's need-based scholarship.
+        self.porters_hired = 0
+        self.scholarship_paid = 0.0
         #: Bumped when someone leaves and someone new moves in. The frontend
         #: learns names once, when it connects, and has to be told.
         self.roster_version = 0
@@ -214,6 +240,9 @@ class Simulation:
             agent.money -= CONFIG.economy.meal_cost
             self._note_broke(agent, before)
 
+        if action.kind is ActionKind.BANK:
+            self._borrow(agent)
+
         if action.kind is ActionKind.INTERVIEW and agent.application is not None:
             # The clock starts when they sit down, not when they set off.
             agent.application.filed_tick = self.clock.tick
@@ -262,11 +291,15 @@ class Simulation:
         if applying is not None:
             return applying
 
+        banking = self._visit_bank(agent)
+        if banking is not None:
+            return banking
+
         bed = self._bedtime(agent)
         if bed is not None:
             return bed
 
-        step = self._due_step(agent)
+        step = self._due_step(agent) if agent.needs.lowest()[1] >= self.PLAN_NEED_FLOOR else None
         if step is not None:
             action = self._follow(agent, step)
             if action is not None:
@@ -319,7 +352,9 @@ class Simulation:
             return None
         if not shift_now(job.role, self.clock.weekday, self.clock.minute_of_day):
             return None
-        if not shows_up(agent.id, job.employer_id, self.clock.day, agent.traits):
+        # Temperament decides whether they set off, unless they are too deep in
+        # debt to afford a missed day. A critical need still outranks the shift.
+        if not self._desperate(agent) and not shows_up(agent.id, job.employer_id, self.clock.day, agent.traits):
             return None
         # Already on the clock: re-deciding would restart the shift and pay twice.
         if agent.action.kind is ActionKind.WORK and agent.action.for_shift:
@@ -336,7 +371,9 @@ class Simulation:
         that. There are only two answers to being out of work — apply, or go
         and become worth hiring — and this picks between them.
         """
-        if agent.job is not None or agent.application is not None:
+        # A porter is still looking: the floor is somewhere to stand, not a job
+        # anyone chose.
+        if (agent.job is not None and agent.job.role_id != PORTER) or agent.application is not None:
             return None
         if agent.enrollment is not None:
             return None  # finish the term first
@@ -346,7 +383,11 @@ class Simulation:
         all_open = vacancies(self.world, headcount(a.job for a in self.agents))
         if not all_open:
             # Nobody is hiring. A degree does not conjure a vacancy, so they
-            # wait on the stipend rather than pay tuition to sit still.
+            # wait on the stipend rather than pay tuition to sit still, unless
+            # the bank is done with them: the floor is never advertised, and
+            # is there on the days nothing else is.
+            if agent.job is None and self._out_of_credit(agent):
+                self._hire_porter(agent)
             return None
 
         cooldown = REJECTION_COOLDOWN_DAYS * TICKS_PER_DAY
@@ -361,7 +402,12 @@ class Simulation:
             # would have them has turned them down lately. The university
             # answers the first; only time answers the second.
             if best_vacancy(agent.skills, agent.credentials, all_open) is None:
-                self._enroll(agent)
+                if agent.job is None:
+                    self._enroll(agent)
+            elif agent.job is None and self._out_of_credit(agent):
+                # They could do the work, nobody has taken them on yet, and the
+                # bank will lend no more: the floor, while they keep looking.
+                self._hire_porter(agent)
             return None
 
         employer = self.world.buildings.get(posting.employer_id)
@@ -376,6 +422,12 @@ class Simulation:
         course = choose_course(agent.skills, agent.credentials, prefer=prefer)
         if course is None:
             return
+        if agent.job is not None and agent.job.role_id == PORTER:
+            # The floor was somewhere to stand while looking. Sent to study,
+            # they leave it: the scholarship carries a student who is short,
+            # and nobody can sit a morning class and carry at ten.
+            agent.memory.add(self.clock.tick, "milestone", "Left portering to study")
+            agent.job = None
         agent.enrollment = Enrollment(course_id=course.id, started_tick=self.clock.tick)
         agent.memory.add(self.clock.tick, "milestone", f"Enrolled in {course.name}")
         self.log(f"{agent.name} enrolled in {course.name}")
@@ -400,12 +452,19 @@ class Simulation:
             return
 
         # Class before work: a term is finite, a shift comes round tomorrow.
-        # Nobody holds both yet — slice 2 is where that choice gets real.
+        # Rarely both at once: a sponsored student is excused shifts, and a
+        # porter leaves the floor to study.
         due = self._due_session(agent) or self._due_shift(agent)
         # Unreachable: leave the original journey alone rather than stranding
         # the agent mid-errand.
         if due is None or due.kind is ActionKind.IDLE:
             return
+        # A porter walking to an interview when the shift calls: the shift wins,
+        # and the application is withdrawn with the walk. Left in place it was
+        # never filed, never decided, and stopped them applying for the rest
+        # of the year.
+        if then is not None and then.kind is ActionKind.INTERVIEW:
+            agent.application = None
         self.redirects += 1
         self._begin(agent, due)
 
@@ -442,6 +501,9 @@ class Simulation:
 
     #: How late a plan step may be and still worth doing, in sim-minutes.
     STEP_GRACE_MINUTES = 120
+    #: A plan step waits while any need is below this. Walks run an hour or
+    #: more, so a need left to go critical is a shift missed on the way to fix it.
+    PLAN_NEED_FLOOR = 55.0
 
     def _due_step(self, agent: Agent) -> PlanStep | None:
         """The earliest step that is due and still worth doing.
@@ -673,7 +735,14 @@ class Simulation:
                 self.shifts_missed[agent.action.kind.value + urgent] += 1
                 # Judged only on a day they failed to appear: nobody is
                 # dismissed on a morning they turned up for.
-                if job.shifts_offered >= FIRING_GRACE_SHIFTS and job.attendance < FIRING_ATTENDANCE:
+                # Except on the floor: a porter is paid by the shift, so absence
+                # already costs them, and firing one only re-hired them the same
+                # day as a fresh "let go".
+                if (
+                    job.role_id != PORTER
+                    and job.shifts_offered >= FIRING_GRACE_SHIFTS
+                    and job.attendance < FIRING_ATTENDANCE
+                ):
                     self._fire(agent)
                     continue
             self._queue_review(agent)
@@ -742,6 +811,13 @@ class Simulation:
             return
         agent.money += job.role.wage
         self.shifts_worked += 1
+        if agent.loan > 0.0:
+            # A share of the wage goes back, but never into an overdraft: the
+            # loan is the cheaper of the two debts.
+            back = min(agent.loan, job.role.wage * REPAYMENT_SHARE, max(0.0, agent.money))
+            agent.loan -= back
+            agent.money -= back
+            self.repaid += back
 
         skill = job.role.skill
         # Scored on the skill they walked in with and the energy they walk out
@@ -787,6 +863,9 @@ class Simulation:
     def _queue_review(self, agent: Agent) -> None:
         """Put someone up for review once the roster has called enough shifts."""
         job = agent.job
+        # The floor has no ladder to climb and no seat to lose: nobody reviews it.
+        if job.role_id == PORTER:
+            return
         if job.review_due_tick >= 0:
             return
         if job.shifts_offered - job.reviewed_offered < REVIEW_EVERY:
@@ -861,8 +940,9 @@ class Simulation:
         return review
 
     #: Ticks an application may wait for a model's verdict before the sim
-    #: decides it. Six hours — a candidate left sitting in a lobby overnight is
-    #: not a simulation of anything. Application.in_flight covers a slow model.
+    #: decides it, headless. Six hours. The interview itself is an hour; after
+    #: it the candidate gets on with their day, so a longer wait is "we'll let
+    #: you know", not a night in a lobby. Application.in_flight covers a slow model.
     INTERVIEW_GRACE_TICKS = TICKS_PER_DAY // 4
 
     def _check_interviews(self) -> None:
@@ -873,7 +953,7 @@ class Simulation:
                 self.pending_interviews.remove(agent)
             elif (
                 not app.in_flight
-                and self.clock.tick - app.filed_tick >= self.INTERVIEW_GRACE_TICKS
+                and self.clock.tick - app.filed_tick >= self.interview_grace
             ):
                 self.hire_or_reject(agent)
 
@@ -1270,14 +1350,105 @@ class Simulation:
                 agent.money += agent.job.role.daily
             if not agent.employed:
                 agent.money += eco.unemployment_stipend
+            if agent.enrollment is not None and agent.money < 0.0:
+                # Need-based: the university covers exactly what a student
+                # cannot, so study never sinks anyone.
+                if not agent.enrollment.scholarship:
+                    agent.enrollment.scholarship = True
+                    agent.memory.add(
+                        self.clock.tick, "milestone",
+                        f"Awarded a need-based scholarship for {agent.enrollment.course.name}",
+                    )
+                    self.log(f"{agent.name} was awarded a need-based scholarship")
+                self.scholarship_paid -= agent.money
+                agent.money = 0.0
+            if agent.loan > 0.0:
+                charge = agent.loan * LOAN_RATE
+                agent.loan += charge
+                self.loan_interest += charge
+            if agent.money < 0.0:
+                agent.money -= OVERDRAFT_FEE
+                self.overdraft_fees += OVERDRAFT_FEE
             self._note_broke(agent, before)
 
     def _note_broke(self, agent: Agent, before: float) -> None:
         """Mark the crossing into debt, once per crossing. Balances may go
-        negative: nobody earns until Phase 5."""
+        negative: an overdraft, charged every night until a wage, a loan or a
+        scholarship clears it."""
         if before >= 0.0 > agent.money:
             agent.memory.add(self.clock.tick, "milestone", "Ran out of money")
             self.log(f"{agent.name} has run out of money")
+
+    # --------------------------------------------------------------------- bank
+
+    def _headroom(self, agent: Agent) -> float:
+        """What Ledger Bank would still lend this agent."""
+        wage = agent.job.role.daily if agent.job is not None else None
+        return credit_limit(wage) - agent.loan
+
+    @staticmethod
+    def _desperate(agent: Agent) -> bool:
+        """A week of living gone on the overdraft."""
+        return agent.money < -DESPERATE_DAYS * LIVING_COST
+
+    def _out_of_credit(self, agent: Agent) -> bool:
+        """Overdrawn, and either the bank will lend no more or a week of living
+        has gone on the overdraft without them asking."""
+        return agent.money < 0.0 and (self._headroom(agent) <= 0.0 or self._desperate(agent))
+
+    def _visit_bank(self, agent: Agent) -> Action | None:
+        """An overdrawn agent deciding whether today is the day they borrow."""
+        if agent.money >= 0.0:
+            return None
+        # A student short of money has the scholarship, settled every night: a
+        # walk to the bank for lunch money only cost them the class they missed.
+        if agent.enrollment is not None:
+            return None
+        if self.clock.weekday > 4 or not OPEN_HOURS[0] <= self.clock.hour < OPEN_HOURS[1]:
+            return None
+        if self.clock.tick - agent.last_bank_tick < TICKS_PER_DAY:
+            return None
+        if self._headroom(agent) <= 0.0:
+            return None
+        # Decided once a day: someone who would rather not is not re-asked
+        # every tick until they give in.
+        agent.last_bank_tick = self.clock.tick
+        if not willing_to_borrow(agent.id, self.clock.day, agent.traits):
+            return None
+        banks = sorted(self.world.of_kind(BuildingKind.BANK), key=lambda b: b.id)
+        if not banks:
+            return None
+        return self._travel_to(agent, banks[0], ActionKind.BANK)
+
+    def _borrow(self, agent: Agent) -> None:
+        """At the counter: enough to clear the overdraft and live a few days,
+        up to the agent's credit limit, or a refusal."""
+        want = max(0.0, -agent.money) + CUSHION_DAYS * LIVING_COST
+        amount = round(min(self._headroom(agent), want), 2)
+        if amount <= 0.0:
+            self.loans_refused += 1
+            agent.memory.add(self.clock.tick, "milestone", "Turned down for a loan at Ledger Bank")
+            self.log(f"{agent.name} was turned down for a loan")
+            return
+        agent.money += amount
+        agent.loan += amount
+        self.loans_made += 1
+        self.lent += amount
+        agent.memory.add(self.clock.tick, "milestone", f"Borrowed ${amount:.0f} from Ledger Bank")
+        self.log(f"{agent.name} borrowed ${amount:.0f} from Ledger Bank")
+
+    def _hire_porter(self, agent: Agent) -> None:
+        """The floor: a porter's job at the market, no interview."""
+        markets = sorted(self.world.of_kind(BuildingKind.MARKET), key=lambda b: b.id)
+        if not markets:
+            return
+        market = markets[0]
+        if headcount(a.job for a in self.agents)[(market.id, PORTER)] >= ROLES[PORTER].seats:
+            return
+        agent.job = Job(market.id, PORTER, started_tick=self.clock.tick)
+        self.porters_hired += 1
+        agent.memory.add(self.clock.tick, "milestone", f"Took work as a porter at {market.name}")
+        self.log(f"{agent.name} took work as a porter at {market.name}")
 
     # ------------------------------------------------------------------- people
 

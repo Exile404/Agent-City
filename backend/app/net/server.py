@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from pathlib import Path
 from collections import Counter
 from contextlib import asynccontextmanager
 
@@ -17,7 +18,7 @@ from app.net.protocol import agent_detail, hello_message, tick_message
 from app.sim.clock import TICKS_PER_DAY
 from app.sim.loop import Simulation
 from app.sim.metrics import city_metrics
-from app.sim.replay import Recorder
+from app.sim.replay import Player, Recorder
 from app.cognition import prompts
 from app.cognition.embed import Embedder
 from app.cognition.llm import Lane, LLMClient, Request, parse_json
@@ -36,11 +37,25 @@ from app.institutions.university import Enrollment, baseline_score
 
 class Hub:
     def __init__(self) -> None:
-        self.sim = Simulation()
-        # The Hub works the review queue one at a time and a fortnight's reviews
-        # fall due together, so with a model on the timer is only a backstop.
-        if CONFIG.llm.enabled:
-            self.sim.review_grace = 3 * TICKS_PER_DAY
+        #: Set when AC_REPLAY names a recording: the city plays it back instead
+        #: of asking a model anything, and the recording sets the grace timers.
+        self.player: Player | None = None
+        if CONFIG.replay.replay_path:
+            self.player = Player(Path(CONFIG.replay.replay_path))
+            problem = self.player.problem()
+            if problem:
+                raise RuntimeError(f"cannot replay {self.player.path.name}: {problem}")
+            self.sim = self.player.sim
+        else:
+            self.sim = Simulation()
+            # The Hub works the review queue one at a time and a fortnight's
+            # reviews fall due together, so with a model on the timer is only a
+            # backstop.
+            if CONFIG.llm.enabled:
+                self.sim.review_grace = 3 * TICKS_PER_DAY
+                # Interviews queue the same way: the day-0 hiring rush outran
+                # six hours, and one in fifteen was decided from the numbers.
+                self.sim.interview_grace = TICKS_PER_DAY
         self.recorder: Recorder | None = None
         self.clients: set[WebSocket] = set()
         self.speed = CONFIG.loop.default_speed
@@ -117,6 +132,13 @@ class Hub:
         self.prompts_with_reflection = 0
         #: One metrics row per sim-morning since the server started, for /metrics.
         self.history: list[dict] = []
+        #: Sleepers already given tonight's plan. Cleared when they wake.
+        self._planned_tonight: set[str] = set()
+        #: Agents with a plan being written right now. An urgent agent won a
+        #: slot every tick it asked, and a plan takes about five ticks to come
+        #: back, so one hungry agent collected seven plans in an hour, each
+        #: replacing the last.
+        self._thinking: set[str] = set()
 
     @property
     def _tick_seconds(self) -> float:
@@ -129,8 +151,10 @@ class Hub:
 
     async def _run(self) -> None:
         # Cold-loading a model takes seconds — long enough that the first agent
-        # to think would blow its staleness window and be thrown away.
-        await self.llm.warmup()
+        # to think would blow its staleness window and be thrown away. A replay
+        # never asks a model, so it has nothing to warm.
+        if self.player is None:
+            await self.llm.warmup()
         while True:
             if self.speed <= 0.0:
                 await asyncio.sleep(0.1)  # paused, but still answering /control
@@ -140,13 +164,19 @@ class Hub:
                 self.history.append(self.metrics_row())
                 if self.recorder is not None:
                     self.recorder.checkpoint(self.sim)
-            self._collect_chats()
-            self._collect_exams()
-            self._collect_interviews()
-            self._collect_reviews()
-            self._collect_reflections()
-            self._collect_asks()
-            self.scheduler.dispatch(self.sim.clock.tick, self._start_thought)
+            if self.player is not None:
+                # Every answer comes from the recording, on the tick it landed.
+                self.player.play()
+                if self.player.finished:
+                    self.speed = 0.0  # hold the last frame
+            else:
+                self._collect_chats()
+                self._collect_exams()
+                self._collect_interviews()
+                self._collect_reviews()
+                self._collect_reflections()
+                self._collect_asks()
+                self.scheduler.dispatch(self.sim.clock.tick, self._start_thought)
             msg = tick_message(self.sim, self._events_sent, self._roster_sent)
             self._roster_sent = self.sim.roster_version
             self._events_sent = self.sim.events_total
@@ -158,6 +188,16 @@ class Hub:
         tick = self.sim.clock.tick
         minutes = CONFIG.world.minutes_per_tick
         for agent in self.sim.agents:
+            # Asleep, one plan a night is enough: tomorrow's. Hunger keeps
+            # falling overnight and the planner reads that as urgency, so
+            # sleepers kept asking — 708 of 778 night plans were replaced while
+            # their agent was still asleep, before a step of them came due.
+            if agent.action.kind is not ActionKind.SLEEP:
+                self._planned_tonight.discard(agent.id)
+            elif agent.id in self._planned_tonight:
+                continue
+            if agent.id in self._thinking:
+                continue
             priority = plan_priority(
                 minutes_since_plan=(tick - agent.last_plan_tick) * minutes,
                 worst_need=agent.needs.lowest()[1],
@@ -169,6 +209,10 @@ class Hub:
                 self.scheduler.ask(agent.id, "plan", priority, tick)
 
     def _start_thought(self, ask: Ask) -> None:
+        agent = self.sim.by_id.get(ask.agent_id)
+        if agent is not None and agent.action.kind is ActionKind.SLEEP:
+            self._planned_tonight.add(agent.id)
+        self._thinking.add(ask.agent_id)
         task = asyncio.create_task(self._think(ask))
         self._thoughts.add(task)
         task.add_done_callback(self._thoughts.discard)
@@ -223,6 +267,7 @@ class Hub:
             # missing agent. Miss one and `outstanding` leaks upward until the
             # scheduler refuses everything and the city stops thinking.
             self.scheduler.finished()
+            self._thinking.discard(ask.agent_id)
 
     async def _vectorize(self, agent: Agent) -> None:
         """Upgrade memories still carrying a lexical placeholder vector.
@@ -700,6 +745,20 @@ class Hub:
     def metrics_row(self) -> dict:
         """The city's numbers and the model's workload, as running totals since
         the server started. The dashboard takes day-to-day differences itself."""
+        if self.player is not None:
+            landed = self.player.landed
+            # A replay knows what landed, not what was asked: plans count the
+            # plans that arrived, and latency was never recorded.
+            return {
+                **city_metrics(self.sim),
+                "plan requests": landed["plan"],
+                "chats": landed["chat"],
+                "reflections": landed["reflection"],
+                "reviews by model": landed["review by model"],
+                "interviews by model": landed["interview by model"],
+                "latency fast": None,
+                "latency smart": None,
+            }
         llm = self.llm.stats.snapshot()
         return {
             **city_metrics(self.sim),
@@ -711,6 +770,13 @@ class Hub:
             "latency fast": llm["latency"].get("fast"),
             "latency smart": llm["latency"].get("smart"),
         }
+
+    def replay_status(self) -> dict | None:
+        """Which recording is playing and whether it still matches, or None live."""
+        p = self.player
+        if p is None:
+            return None
+        return {"file": p.path.name, "mornings": p.mornings, "finished": p.finished, "mismatch": p.mismatch}
 
     async def broadcast(self, message: dict) -> None:
         # Gather failures first: a set cannot be mutated while iterating, and a
@@ -726,8 +792,8 @@ class Hub:
 
     def start(self) -> None:
         # Opened here rather than in __init__, so importing the server never
-        # leaves an empty recording behind.
-        if CONFIG.replay.record:
+        # leaves an empty recording behind. A replay is not recorded again.
+        if CONFIG.replay.record and self.player is None:
             self.recorder = Recorder.open(self.sim)
             self.sim.recorder = self.recorder
         self.history.append(self.metrics_row())
@@ -804,6 +870,7 @@ def health() -> dict:
         "reviewOutcomes": dict(hub.review_outcomes),
         "reviewVerdicts": dict(hub.review_verdicts),
         "recording": hub.recorder.path.name if hub.recorder else None,
+        "replay": hub.replay_status(),
         "reflectionsDone": hub.reflections_done,
         "reflectionsFallback": hub.reflections_fallback,
         "reflectionsTimeout": hub.reflections_timeout,
@@ -822,7 +889,7 @@ def health() -> dict:
 @app.get("/metrics")
 def metrics() -> dict:
     """Every morning since the server started, plus this moment."""
-    return {"days": hub.history, "now": hub.metrics_row()}
+    return {"days": hub.history, "now": hub.metrics_row(), "replay": hub.replay_status()}
 
 
 @app.get("/agent/{agent_id}")

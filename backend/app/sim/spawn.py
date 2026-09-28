@@ -1,25 +1,22 @@
 """Populate the city.
 
 Deterministic from CONFIG.seed: the same seed yields the same fifty people, in
-the same homes, with the same aptitudes. Phase 7's replay depends on it, and so
-does ever reproducing a bug.
+the same homes, with the same aptitudes. Replay depends on it, and so does
+reproducing any bug.
 """
 
 from __future__ import annotations
 
-from random import Random
 from collections import Counter
-from app.agents.actions import Action, ActionKind
-from app.agents.agent import SKILLS, Agent
-from app.config import CONFIG
-from app.institutions.university import Enrollment, choose_course
-from app.sim.clock import TICKS_PER_DAY
-from app.sim.world import BuildingKind, TileKind, World
+from random import Random
+
 from app.agents.actions import Action, ActionKind
 from app.agents.agent import SKILLS, Agent
 from app.config import CONFIG
 from app.institutions.companies import Job, best_vacancy, vacancies
 from app.institutions.university import Enrollment, choose_course
+from app.sim.clock import TICKS_PER_DAY
+from app.sim.world import BuildingKind, TileKind, World
 
 FIRST = (
     "Maya", "Ravi", "Nadia", "Omar", "Lena", "Tariq", "Ines", "Kofi", "Sana", "Diego",
@@ -46,7 +43,7 @@ def _skills(rng: Random) -> dict[str, float]:
     skills = {s: max(0.0, rng.gauss(20.0, 8.0)) for s in SKILLS}
     # Everyone is notably better at one thing. Uniform agents make a dull
     # job market — every candidate interviews the same. A spike each gives
-    # Phase 5 real matching to do.
+    # the job market real matching to do.
     spike = rng.choice(SKILLS)
     skills[spike] = min(100.0, skills[spike] + 25.0)
     return skills

@@ -3,7 +3,7 @@
 A live run is the seeded simulation plus whatever the models said, applied on
 whatever tick each answer landed. Record the second half and the first half
 replays for free — which only holds if the simulation itself is deterministic.
-This module checks that, and will hold the recorder and the replayer.
+This module checks that, and holds the recorder and the player.
 
 Everything the Hub does to the simulation, so everything a recording must carry:
 
@@ -17,7 +17,8 @@ Everything the Hub does to the simulation, so everything a recording must carry:
   review     starts  job.review_in_flight
              lands   hold_review(agent, verdict, comment)
   reflection lands   a "reflection" memory per insight, since_reflection reset
-  startup            sim.review_grace, stretched when a model is on
+  startup            sim.review_grace and sim.interview_grace, stretched when a
+                     model is on
 
 Retrieval also moves memory.last_access and embedding fills in vectors, but
 both only shape the next prompt, never a number, so neither is fingerprinted.
@@ -30,7 +31,7 @@ import hashlib
 import json
 import os
 import time
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Callable
 from enum import Enum
 from pathlib import Path
@@ -43,6 +44,15 @@ from app.config import CONFIG
 STATIC = frozenset({"world", "paths", "_interiors", "by_id", "recorder"})
 #: Changed off the tick path by retrieval and embedding; they shape prompts only.
 PROMPT_ONLY = frozenset({"vector", "last_access", "pending"})
+#: Settings that change how a run is paced, where it is written or which model
+#: answers, never what the simulation does with an answer. A replay may differ
+#: in these; any other AC_* setting would change every number.
+NEUTRAL = frozenset({
+    "AC_REPLAY", "AC_RECORD", "AC_RECORD_DIR", "AC_SECONDS_PER_TICK",
+    "AC_LLM_ENABLED", "AC_LLM_TIMEOUT", "AC_FAST_MODEL", "AC_SMART_MODEL",
+    "AC_FAST_CONCURRENCY", "AC_SMART_CONCURRENCY",
+    "AC_EXAM_STALENESS", "AC_INTERVIEW_STALENESS", "AC_REVIEW_STALENESS",
+})
 
 
 def _fields(obj: Any) -> list[tuple[str, Any]]:
@@ -117,6 +127,7 @@ class Recorder:
             # Every tuning knob is read from AC_* at import, so these recreate the city.
             "env": {k: v for k, v in sorted(os.environ.items()) if k.startswith("AC_")},
             "review_grace": sim.review_grace,
+            "interview_grace": sim.interview_grace,
             "fingerprint": fingerprint(sim),
         })
 
@@ -147,77 +158,133 @@ class Recorder:
             self._out.close()
 
 
+class Player:
+    """A recording walked back into a fresh simulation, a tick at a time.
+
+    The headless replayer drives it flat out; the Hub's replay mode drives it at
+    the city's own pace, so a recorded run can be watched in the 3D view and on
+    the dashboard with no model at all.
+    """
+
+    def __init__(self, path: Path) -> None:
+        # Imported here: loop imports this module for the Recorder.
+        from app.agents.actions import ActionKind
+        from app.cognition.prompts import PlanStep
+        from app.sim.loop import Simulation
+
+        self.path = path
+        self.events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+        self.head = self.events[0]
+        self.sim = sim = Simulation(self.head["seed"])
+        sim.review_grace = self.head["review_grace"]
+        sim.interview_grace = self.head.get("interview_grace", sim.interview_grace)
+        #: Index of the next event to apply.
+        self.next = 1
+        self.mornings = 0
+        self.raised = 0
+        #: Where the replay stopped matching the recording, if it did.
+        self.mismatch: str | None = None
+        #: Doors walked through, by kind, and by the model where a door can also
+        #: open from the numbers: the dashboard's count of the model's work.
+        self.landed: Counter[str] = Counter()
+
+        def who(agent_id: str) -> Any:
+            return sim.by_id[agent_id]
+
+        def pair(paper: list[str] | None) -> tuple[str, str] | None:
+            return (paper[0], paper[1]) if paper else None
+
+        self._doors: dict[str, Callable[[dict], Any]] = {
+            "start": lambda e: sim.model_started(e["kind"], who(e["agent"])),
+            "end": lambda e: sim.model_finished(e["kind"], who(e["agent"])),
+            "plan": lambda e: sim.land_plan(
+                who(e["agent"]),
+                [PlanStep(at, ActionKind(kind), place, why) for at, kind, place, why in e["steps"]],
+            ),
+            "chat": lambda e: sim.land_chat(
+                who(e["a"]), who(e["b"]), [(w, s) for w, s in e["lines"]], e["warmth"], e["place"]
+            ),
+            "exam": lambda e: sim.land_exam(who(e["agent"]), e["mark"], pair(e["paper"]), e["comment"]),
+            "interview": lambda e: sim.land_interview(
+                who(e["agent"]), e["verdict"], pair(e["paper"]), e["reason"]
+            ),
+            "review": lambda e: sim.land_review(who(e["agent"]), e["verdict"], e["comment"]),
+            "reflection": lambda e: sim.land_reflection(who(e["agent"]), e["insights"]),
+        }
+
+    def problem(self) -> str | None:
+        """Why this recording cannot replay here, or None if it can."""
+        here, recorded = _settings(os.environ), _settings(self.head["env"])
+        if here != recorded:
+            return (f"recorded under {recorded or 'no AC_* settings'}, running under"
+                    f" {here or 'none'}: every number would differ, so this would prove nothing")
+        if fingerprint(self.sim) != self.head["fingerprint"]:
+            return "the city differs before the first tick: this is not the code that recorded it"
+        return None
+
+    @property
+    def finished(self) -> bool:
+        return self.mismatch is not None or self.next >= len(self.events)
+
+    @property
+    def next_tick(self) -> int:
+        return self.events[self.next]["t"]
+
+    def play(self, on_morning: Callable[[Any], None] | None = None) -> None:
+        """Apply everything recorded for the tick the city is on: the morning's
+        fingerprint check first, then the doors, in the order they were written."""
+        sim = self.sim
+        while not self.finished and self.next_tick <= sim.clock.tick:
+            e = self.events[self.next]
+            self.next += 1
+            if e["op"] in ("day", "stop"):
+                parts = fingerprint_parts(sim)
+                if _digest(sorted(parts.items())) != e["fingerprint"]:
+                    recorded = e.get("parts") or {}
+                    differ = sorted(k for k in parts if recorded.get(k) != parts[k]) if recorded else []
+                    self.mismatch = f"{sim.clock}" + (f" in {', '.join(differ[:12])}" if differ else "")
+                    return
+                if e["op"] == "day":
+                    self.mornings += 1
+                    if on_morning is not None:
+                        on_morning(sim)
+                continue
+            try:
+                self._doors[e["op"]](e)
+            except Exception:
+                # The live Hub caught these too, and a door raises at the same
+                # point both times, so the city is left in the same state.
+                self.raised += 1
+                continue
+            self.landed[e["op"]] += 1
+            if e.get("verdict") is not None:
+                self.landed[f"{e['op']} by model"] += 1
+
+
+def _settings(env: Any) -> dict[str, str]:
+    """The AC_* settings that change what the simulation does."""
+    return {k: v for k, v in env.items() if k.startswith("AC_") and k not in NEUTRAL}
+
+
 def replay(path: Path, on_morning: Callable[[Any], None] | None = None) -> bool:
     """Run a recording back through a headless simulation, checking every
     morning's fingerprint against the live run's. True if all of them match.
     on_morning, if given, sees the rebuilt city at each morning that matched."""
-    # Imported here: loop imports this module for the Recorder.
-    from app.agents.actions import ActionKind
-    from app.cognition.prompts import PlanStep
-    from app.sim.loop import Simulation
-
-    events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
-    head = events[0]
-    print(f"replaying {path.name}: {len(events)} events")
-    here = {k: v for k, v in sorted(os.environ.items()) if k.startswith("AC_")}
-    if here != head["env"]:
-        print(f"  recorded under {head['env'] or 'no AC_* settings'}, running under"
-              f" {here or 'none'}: every number would differ, so this would prove nothing")
+    player = Player(path)
+    print(f"replaying {path.name}: {len(player.events)} events")
+    problem = player.problem()
+    if problem:
+        print(f"  {problem}")
         return False
-
-    sim = Simulation(head["seed"])
-    sim.review_grace = head["review_grace"]
-    if fingerprint(sim) != head["fingerprint"]:
-        print("  the city differs before the first tick: this is not the code that recorded it")
-        return False
-
-    def who(agent_id: str) -> Any:
-        return sim.by_id[agent_id]
-
-    def pair(paper: list[str] | None) -> tuple[str, str] | None:
-        return (paper[0], paper[1]) if paper else None
-
-    doors = {
-        "start": lambda e: sim.model_started(e["kind"], who(e["agent"])),
-        "end": lambda e: sim.model_finished(e["kind"], who(e["agent"])),
-        "plan": lambda e: sim.land_plan(
-            who(e["agent"]),
-            [PlanStep(at, ActionKind(kind), place, why) for at, kind, place, why in e["steps"]],
-        ),
-        "chat": lambda e: sim.land_chat(
-            who(e["a"]), who(e["b"]), [(w, s) for w, s in e["lines"]], e["warmth"], e["place"]
-        ),
-        "exam": lambda e: sim.land_exam(who(e["agent"]), e["mark"], pair(e["paper"]), e["comment"]),
-        "interview": lambda e: sim.land_interview(
-            who(e["agent"]), e["verdict"], pair(e["paper"]), e["reason"]
-        ),
-        "review": lambda e: sim.land_review(who(e["agent"]), e["verdict"], e["comment"]),
-        "reflection": lambda e: sim.land_reflection(who(e["agent"]), e["insights"]),
-    }
-
-    mornings = raised = 0
-    for e in events[1:]:
-        while sim.clock.tick < e["t"]:
+    sim = player.sim
+    while not player.finished:
+        while sim.clock.tick < player.next_tick:
             sim.tick()
-        if e["op"] in ("day", "stop"):
-            parts = fingerprint_parts(sim)
-            if _digest(sorted(parts.items())) != e["fingerprint"]:
-                recorded = e.get("parts") or {}
-                differ = sorted(k for k in parts if recorded.get(k) != parts[k]) if recorded else []
-                print(f"  {sim.clock}  MISMATCH" + (f" in {', '.join(differ[:12])}" if differ else ""))
-                return False
-            if e["op"] == "day":
-                mornings += 1
-                if on_morning is not None:
-                    on_morning(sim)
-            continue
-        try:
-            doors[e["op"]](e)
-        except Exception:
-            # The live Hub caught these too, and a door raises at the same point
-            # both times, so the city is left in the same state either way.
-            raised += 1
-    print(f"  {sim.clock}  all {mornings} mornings match; {raised} doors raised")
+        player.play(on_morning)
+    if player.mismatch:
+        print(f"  MISMATCH at {player.mismatch}")
+        return False
+    print(f"  {sim.clock}  all {player.mornings} mornings match; {player.raised} doors raised")
     return True
 
 
@@ -226,7 +293,7 @@ if __name__ == "__main__":
 
     target = Path(sys.argv[1])
     recorded = json.loads(target.open(encoding="utf-8").readline())["env"]
-    if {k: v for k, v in os.environ.items() if k.startswith("AC_")} != recorded:
+    if _settings(os.environ) != _settings(recorded):
         # CONFIG is read from the environment at import, so the recorded settings
         # have to be in place before Python starts, not patched in afterwards.
         env = {k: v for k, v in os.environ.items() if not k.startswith("AC_")} | recorded

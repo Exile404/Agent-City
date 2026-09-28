@@ -21,6 +21,9 @@ class ActionKind(str, Enum):
     #: Sim-dispatched only. Deliberately absent from prompts.PLANNABLE — an
     #: agent does not decide to be interviewed, they go and get interviewed.
     INTERVIEW = "interview"
+    #: Sim-dispatched only, like INTERVIEW: nobody plans a trip to the bank,
+    #: they go when their balance sends them.
+    BANK = "bank"
     SOCIALIZE = "socialize"
     EXERCISE = "exercise"
 
@@ -42,6 +45,7 @@ DURATION_MINUTES: dict[ActionKind, int] = {
     ActionKind.STUDY: 120,
     ActionKind.WORK: 240,
     ActionKind.INTERVIEW: 60,
+    ActionKind.BANK: 30,
     ActionKind.SOCIALIZE: 60,
     ActionKind.EXERCISE: 60,
 }

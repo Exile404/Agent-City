@@ -15,4 +15,5 @@ export const ACTION_COLORS: Record<string, string> = {
   work: '#d7d74a',
   socialize: '#d76b9e',
   exercise: '#4ad78b',
+  bank: '#4ab8d7',
 }

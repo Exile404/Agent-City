@@ -39,9 +39,7 @@ def lexical_vector(text: str) -> list[float]:
         if token in _STOPWORDS or len(token) < 3:
             continue
         vec[zlib.crc32(token.encode()) % LEXICAL_DIM] += 1.0
-
-    norm = sum(v * v for v in vec) ** 0.5
-    return [v / norm for v in vec] if norm > 0 else vec
+    return _unit(vec)
 
 
 def cosine(a: list[float], b: list[float]) -> float:

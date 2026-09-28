@@ -37,4 +37,10 @@ def city_metrics(sim: Any) -> dict[str, float | None]:
         # One direction of a relationship at affinity 20 or more. Conversations
         # are the live city's main lever on this, so it should drift most.
         "warm ties": sum(r.affinity >= 20 for a in agents for r in a.relationships.values()),
+        # Money trouble: who is overdrawn, who owes the bank, who took the floor.
+        "overdrawn": sum(a.money < 0 for a in agents),
+        "borrowers": sum(a.loan > 0 for a in agents),
+        "owed to bank": round(sum(a.loan for a in agents), 1),
+        "porters": sum(a.job is not None and a.job.role_id == "porter" for a in agents),
+        "scholarship paid": round(sim.scholarship_paid, 1),
     }

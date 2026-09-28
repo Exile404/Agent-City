@@ -75,8 +75,8 @@ class Agent:
     #: Far in the past so every agent looks overdue on the first tick.
     last_plan_tick: int = -10_000
     relationships: dict[str, Relationship] = field(default_factory=dict)
-    #: None means not a student. One course at a time, which is what keeps exam
-    #: volume affordable once Phase 4's grading lands.
+    #: None means not a student. One course at a time, which keeps the number
+    #: of model-graded exams affordable.
     enrollment: Enrollment | None = None
     credentials: list[str] = field(default_factory=list)
     #: The seat this agent holds, None while looking. Shifts, wages and the
@@ -89,6 +89,10 @@ class Agent:
     rejected_by: dict[str, int] = field(default_factory=dict)
     #: Far in the past so a new arrival may apply at once.
     last_applied_tick: int = -10_000
+    #: Owed to Ledger Bank, interest included. Zero for most of the city.
+    loan: float = 0.0
+    #: Last tick they set off for the bank: one visit a day at most.
+    last_bank_tick: int = -10_000
 
     @property
     def pos(self) -> tuple[int, int]:

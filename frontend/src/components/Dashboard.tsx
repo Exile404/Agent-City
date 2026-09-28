@@ -11,7 +11,8 @@ import {
 } from 'recharts'
 
 type Row = Record<string, number | null>
-type Metrics = { days: Row[]; now: Row }
+type Replay = { file: string; mornings: number; finished: boolean; mismatch: string | null }
+type Metrics = { days: Row[]; now: Row; replay: Replay | null }
 type Unit = 'count' | 'percent' | 'money' | 'seconds'
 type ChartSpec = { title: string; note?: string; unit?: Unit; series: [key: string, label: string][] }
 
@@ -36,6 +37,7 @@ const CHARTS: ChartSpec[] = [
   { title: 'Careers', note: 'Running totals', series: [['promotions', 'promoted'], ['sponsored', 'sponsored courses'], ['dismissals', 'dismissed']] },
   { title: 'Median money', unit: 'money', series: [['median money', 'median money']] },
   { title: 'Warm ties', note: 'Relationships at affinity 20 or more', series: [['warm ties', 'warm ties']] },
+  { title: 'Money trouble', note: 'People, each morning', series: [['overdrawn', 'overdrawn'], ['borrowers', 'owe the bank'], ['porters', 'porters']] },
   { title: "The model's day", note: 'Per sim-day', series: [['plans a day', 'plan requests'], ['chats a day', 'chats'], ['reflections a day', 'reflections']] },
   { title: 'Written by the model', note: 'Share of reviews and interviews so far', unit: 'percent', series: [['review share', 'reviews'], ['interview share', 'interviews']] },
   { title: 'Model latency', note: 'Seconds per call, smoothed', unit: 'seconds', series: [['latency fast', 'plans'], ['latency smart', 'talk']] },
@@ -184,14 +186,27 @@ export default function Dashboard({ api }: { api: string }) {
   const rows = derive(metrics.days)
   const now = metrics.now
   const n = (k: string) => now[k] ?? 0
+  // Rates come from the last morning: mid-day, a shift under way has been
+  // called but not yet worked, so attendance would dip until it finishes.
+  const morning = metrics.days[metrics.days.length - 1]
 
   return (
     <div className="p-5">
+      {/* A replay looks exactly like a live city, so say which it is. */}
+      {metrics.replay && (
+        <div className="mb-3 rounded-md border border-edge bg-panel px-3 py-2 text-xs text-muted">
+          Replaying <span className="text-[#e8e8f0]">{metrics.replay.file}</span> — no model calls;
+          every answer comes from the recording.{' '}
+          {metrics.replay.mismatch
+            ? `It stopped matching the recording at ${metrics.replay.mismatch}.`
+            : `${metrics.replay.mornings} mornings match${metrics.replay.finished ? ', and the recording has ended.' : ' so far.'}`}
+        </div>
+      )}
       <div className="mb-4 grid grid-cols-[repeat(auto-fill,minmax(9rem,1fr))] gap-3">
         <Tile label="Employed" value={`${n('employed')} of ${n('employed') + n('students') + n('looking')}`} />
         <Tile
           label="Attendance"
-          value={now['attendance'] == null ? '—' : FORMAT.percent(now['attendance'])}
+          value={morning?.['attendance'] == null ? '—' : FORMAT.percent(morning['attendance'])}
         />
         <Tile label="Hired so far" value={FORMAT.count(n('hires'))} />
         <Tile label="Promoted so far" value={FORMAT.count(n('promotions'))} />
