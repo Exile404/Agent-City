@@ -38,6 +38,7 @@ const CHARTS: ChartSpec[] = [
   { title: 'Median money', unit: 'money', series: [['median money', 'median money']] },
   { title: 'Warm ties', note: 'Relationships at affinity 20 or more', series: [['warm ties', 'warm ties']] },
   { title: 'Money trouble', note: 'People, each morning', series: [['overdrawn', 'overdrawn'], ['borrowers', 'owe the bank'], ['porters', 'porters']] },
+  { title: 'Public money', note: 'Balances each morning', unit: 'money', series: [['treasury', 'treasury'], ['university fund', 'university fund']] },
   { title: "The model's day", note: 'Per sim-day', series: [['plans a day', 'plan requests'], ['chats a day', 'chats'], ['reflections a day', 'reflections']] },
   { title: 'Written by the model', note: 'Share of reviews and interviews so far', unit: 'percent', series: [['review share', 'reviews'], ['interview share', 'interviews']] },
   { title: 'Model latency', note: 'Seconds per call, smoothed', unit: 'seconds', series: [['latency fast', 'plans'], ['latency smart', 'talk']] },

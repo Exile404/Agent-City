@@ -93,6 +93,8 @@ class Agent:
     loan: float = 0.0
     #: Last tick they set off for the bank: one visit a day at most.
     last_bank_tick: int = -10_000
+    #: Tick of their last bankruptcy; the bank lends nothing for a while after.
+    bankrupt_tick: int = -1_000_000
 
     @property
     def pos(self) -> tuple[int, int]:

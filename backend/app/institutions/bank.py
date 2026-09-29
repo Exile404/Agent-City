@@ -24,6 +24,11 @@ OVERDRAFT_FEE = 5.0
 #: Overdrawn by a week of living: past this, a missed shift is not something
 #: they can afford, and temperament stops keeping them home.
 DESPERATE_DAYS = 7
+#: Owed past this many days of living, loan and overdraft together, and the
+#: debt is written off: bankruptcy.
+BANKRUPTCY_DAYS = 30
+#: After a bankruptcy, the bank lends nothing for this many days.
+BANKRUPTCY_BAN_DAYS = 90
 #: Share of every wage the bank takes until the loan is repaid.
 REPAYMENT_SHARE = 0.20
 #: Credit, in days of what someone earns: a job's daily rate, or the stipend.

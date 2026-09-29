@@ -83,7 +83,7 @@ everything between.
 | 5 | Companies, job postings, LLM interviews, hiring | ✅ Done |
 | 6 | Org hierarchy, task assignment, reviews, promotions | ✅ Done |
 | 7 | Reflection, deterministic replay, metrics dashboard | ✅ Done |
-| 8 | Bank, floor job, replay viewer, a year lived | ✅ Done |
+| 8 | Bank, public money, floor job, replay viewer, a year lived | ✅ Done |
 
 ## Running it
 
@@ -179,7 +179,7 @@ backend/app/
                    replay (fingerprint, recorder, replayer), metrics
   agents/          Agent state, needs, skills, actions, relationships
   cognition/       Memory stream, LLM client, scheduler, prompts   (Phase 2)
-  institutions/    University, companies, job market, hierarchy, bank (Phases 4-6, 8)
+  institutions/    University, companies, job market, hierarchy, bank, government (Phases 4-6, 8)
   net/             FastAPI, WebSocket broadcast, control API
 frontend/src/
   components/      Metrics dashboard
@@ -540,7 +540,26 @@ The city is richer and less churned, and it studies less: with a floor under the
 fewer people are sent to become employable. Attendance reads 0.746 → 0.701 mostly
 because porters, at 45%, are now on a roster instead of off one; everyone else
 moved by a point and a half. The deepest debt is still a chronic absentee on the
-floor, and it now falls by a fixed amount a day.
+floor, and it falls by a fixed amount a day until bankruptcy stops it.
+
+**Bankruptcy is the ceiling.** Past about a month of living owed — loan and
+overdraft together, roughly $2,430 — the debt is written off, the bank lends
+nothing for 90 days, and the record says so. Across four seeds the year's
+deepest balance went from −$7,700…−$13,100 to −$1,200…−$2,300. The same few
+people go bankrupt again every few months — 20 to 27 bankruptcies a year among
+8 to 14 people, the chronic absentees on the floor — and that is left as it is:
+a clean slate does not make anyone turn up.
+
+**Who pays for the university.** The scholarship used to be free money: $170,000
+a year from nowhere. Now income tax takes 5% of every wage except the porter's
+and pays the stipend, and employers add a 4% training levy to every wage they
+pay, straight into the university's fund along with all tuition — the student's
+own, or the employer's for a sponsored course. The fund pays the scholarships;
+when it runs short, the government covers the rest. Over a headless year tax
+brought in $92,700 and the levy $76,200, and the year ended with the treasury
+at +$18,300 and the fund at +$11,100. The government borrows for the first 200
+days, down to −$28,600, because the university starts full and the fund starts
+empty. Take-home pay is 5% lower, and median money with it.
 
 ## How a run replays
 
@@ -656,11 +675,42 @@ Attendance matches all year. Conversations are the model's clearest mark: 64% mo
 warm ties, peaking at 1,300 on day 240, before fifteen retirements replaced
 residents with newcomers who knew nobody. The extra churn is concentrated, not
 general — stall hands on a 07:00 shift were let go 69 times against 34, gas
-technicians on 08:00 34 times against five or fewer. Live agents also earn fewer
-credentials, not yet traced.
+technicians on 08:00 34 times against five or fewer. Live agents also earned fewer
+credentials, traced below.
 
 Diego Rahman ended the year a 62-year-old Product Lead with $55,267. Thea Moreau
 holds six credentials. Marcus Moreau, a porter, ends it $11,720 overdrawn.
+
+### After the year
+
+The year's recording answered its own questions: each fix below was first tried
+against the year's recorded model answers, with no GPU, then checked live.
+
+**An alarm clock.** Stall hands attended 31% of their 07:00 shifts, and two in
+three misses were someone still asleep: sleep runs eight hours from whenever it
+starts, and a walk home of up to two hours put the start past midnight. A sleep
+that would run into the next shift's window now ends when the window opens. On
+the recorded answers stall hands went from 32% to 80% and firings by day 120
+halved, for 2% of tasks done tired. Headless, nobody sleeps through a shift.
+
+**The pass line belongs to the numbers.** Live students attended more than
+headless ones and earned higher baseline marks, yet passed less: the model
+marked the answer it had just written about 11 points low, failing 41 papers the
+numbers passed. Its mark still stands, but it can no longer cross the pass line
+— the rule reviews already follow. On the recorded answers the pass rate went
+from 60% to 73%, against 75% headless, and the year's credentials from 82 to 102.
+
+A 30-day live check on the new rules, beside the year's first 30 days:
+
+| day 30 | the live year | live check | headless |
+|---|---|---|---|
+| attendance | 0.686 | 0.766 | 0.737 |
+| stall hand / gas tech | 43% / 52% | 79% / 66% | 78% / 66% |
+| let go | 17 | 7 | 10 |
+| passes the model turned to fails | 6 of 38 | 0 of 38 | — |
+| credentials | 31 | 36 | 36 |
+
+Live attendance is now above headless, and the recording replays exactly.
 
 ## How an agent reflects
 
@@ -691,16 +741,9 @@ simply true.
 
 ## Still open
 
-- **Early shifts carry the live churn.** Stall hands (07:00) and gas technicians
-  (08:00) account for most of the live year's 91 extra dismissals. Stall hands
-  sleep through a fifth of their shifts even headless.
-- **Live agents earn fewer credentials** — 82 against 111 over a year, with fewer
-  promotions. Not yet traced.
-- **Debt has a cost but no ceiling.** A porter needs 85% attendance to cover rent
-  and meals and averages 45%, so the deepest balances fall all year, in a straight
-  line. There is no bankruptcy.
-- **The scholarship is free money.** The university covered about $160,000 of
-  student shortfall in the live year, and nothing funds it.
+- **The live year predates the last four fixes.** The alarm, the exam rule,
+  bankruptcy and public money are confirmed by a 30-day live check; a fresh
+  year would measure them.
 - **Headless tuning is an approximation of the live city** — by the measured gaps
   above, and on purpose.
 - **Reflection lags to the night,** and early insights are generic until memories
@@ -997,6 +1040,11 @@ recording then served as the bench for every candidate fix.
 
 **A fix can expose what the bug was hiding.** Plans were overwritten so often that
 nobody noticed they ignored needs. Making them stick is what showed it.
+
+**Test a fix on the answers you already have.** A recording holds every model
+answer of its run. Replaying them through new rules measured the alarm and the
+exam rule in minutes with no GPU — the one thing it cannot say is how the model
+would have answered a different city, which is what the live check is for.
 
 ## License
 

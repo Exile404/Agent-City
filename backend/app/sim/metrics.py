@@ -43,4 +43,7 @@ def city_metrics(sim: Any) -> dict[str, float | None]:
         "owed to bank": round(sum(a.loan for a in agents), 1),
         "porters": sum(a.job is not None and a.job.role_id == "porter" for a in agents),
         "scholarship paid": round(sim.scholarship_paid, 1),
+        "bankruptcies": sim.bankruptcies,
+        "treasury": round(sim.treasury, 1),
+        "university fund": round(sim.university_fund, 1),
     }

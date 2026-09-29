@@ -26,6 +26,7 @@ from app.institutions.companies import (
     POOR_WORK,
     REJECTION_COOLDOWN_DAYS,
     REVIEW_EVERY,
+    SHIFT_EARLY_MINUTES,
     WARNINGS_TO_FIRE,
     Application,
     Job,
@@ -60,7 +61,7 @@ from app.institutions.university import (
     session_starts_now,
     study_gain,
 )
-from app.sim.clock import TICKS_PER_DAY, Clock
+from app.sim.clock import MINUTES_PER_DAY, TICKS_PER_DAY, Clock
 from app.sim.layout import build_city
 from app.sim.pathing import PathCache
 from app.sim.replay import Recorder
@@ -69,6 +70,8 @@ from app.sim.world import Building, BuildingKind, TileKind
 from app.institutions.companies import BY_ID as ROLES
 from app.institutions.companies import PORTER
 from app.institutions.bank import (
+    BANKRUPTCY_BAN_DAYS,
+    BANKRUPTCY_DAYS,
     CUSHION_DAYS,
     DESPERATE_DAYS,
     LIVING_COST,
@@ -79,6 +82,7 @@ from app.institutions.bank import (
     credit_limit,
     willing_to_borrow,
 )
+from app.institutions.government import INCOME_TAX, TRAINING_LEVY
 
 #: Need -> (what fixes it, where it happens). None means the agent's own home.
 NEED_REMEDY: dict[str, tuple[ActionKind, BuildingKind | None]] = {
@@ -172,6 +176,15 @@ class Simulation:
         #: The minimum-wage floor, and the university's need-based scholarship.
         self.porters_hired = 0
         self.scholarship_paid = 0.0
+        #: Bankruptcies, and what they wrote off.
+        self.bankruptcies = 0
+        self.written_off = 0.0
+        #: Public money. The treasury takes income tax and pays the stipend and any
+        #: scholarship the fund cannot; the fund takes tuition and the levy.
+        self.treasury = 0.0
+        self.university_fund = 0.0
+        self.tax_collected = 0.0
+        self.levy_collected = 0.0
         #: Bumped when someone leaves and someone new moves in. The frontend
         #: learns names once, when it connects, and has to be told.
         self.roster_version = 0
@@ -223,6 +236,10 @@ class Simulation:
         if action.kind is not ActionKind.TRAVEL and action.ends_at < 0:
             minutes = DURATION_MINUTES.get(action.kind, 10)
             action.ends_at = self.clock.tick + max(1, minutes // CONFIG.world.minutes_per_tick)
+            if action.kind is ActionKind.SLEEP:
+                wake = self._alarm(agent)
+                if wake is not None and wake < action.ends_at:
+                    action.ends_at = max(wake, self.clock.tick + 1)
 
         agent.action = action
 
@@ -652,6 +669,9 @@ class Simulation:
         else:
             band = CONFIG.university.exam_mark_band
             score = max(expected - band, min(expected + band, score))
+            # Pass or fail is the numbers', as a review's verdict is the record's:
+            # the model's mark moves only on its own side of the line.
+            score = max(score, PASS_MARK) if expected >= PASS_MARK else min(score, PASS_MARK - 1.0)
         passed = score >= PASS_MARK
 
         if agent in self.pending_exams:
@@ -760,6 +780,19 @@ class Simulation:
             and action.then.for_shift
         )
 
+    def _alarm(self, agent: Agent) -> int | None:
+        """The tick the next shift's window opens: nobody sleeps through the start."""
+        job = agent.job
+        if job is None or self.seconded(agent):
+            return None
+        now = self.clock.total_minutes
+        for d in range(8):
+            day = self.clock.day + d
+            opens = day * MINUTES_PER_DAY + job.role.hour * 60 - SHIFT_EARLY_MINUTES
+            if day % 7 in job.role.days and opens > now:
+                return (opens - CONFIG.world.start_hour * 60) // CONFIG.world.minutes_per_tick
+        return None
+
     def manager_of(self, agent: Agent) -> Agent | None:
         """Whoever holds the nearest filled rung above this agent's, at the
         same employer. An empty rung is skipped, so a clerk whose records
@@ -809,7 +842,7 @@ class Simulation:
             return
         if action.kind is not ActionKind.WORK or action.target_id != job.employer_id:
             return
-        agent.money += job.role.wage
+        self._pay(agent, job.role.wage)
         self.shifts_worked += 1
         if agent.loan > 0.0:
             # A share of the wage goes back, but never into an overdraft: the
@@ -1342,14 +1375,19 @@ class Simulation:
         for agent in self.agents:
             before = agent.money
             agent.money -= eco.daily_rent
-            if agent.enrollment is not None and agent.enrollment.sponsor is None:
-                agent.money -= eco.tuition_per_day
+            if agent.enrollment is not None:
+                # Tuition reaches the university either way: from the student,
+                # or from the employer who sponsored the course.
+                if agent.enrollment.sponsor is None:
+                    agent.money -= eco.tuition_per_day
+                self.university_fund += eco.tuition_per_day
             if self.seconded(agent) and agent.job is not None:
                 # Full pay while away on the employer's course: the daily rate
                 # is what a normal week of shifts averages out to.
-                agent.money += agent.job.role.daily
+                self._pay(agent, agent.job.role.daily)
             if not agent.employed:
                 agent.money += eco.unemployment_stipend
+                self.treasury -= eco.unemployment_stipend
             if agent.enrollment is not None and agent.money < 0.0:
                 # Need-based: the university covers exactly what a student
                 # cannot, so study never sinks anyone.
@@ -1360,7 +1398,7 @@ class Simulation:
                         f"Awarded a need-based scholarship for {agent.enrollment.course.name}",
                     )
                     self.log(f"{agent.name} was awarded a need-based scholarship")
-                self.scholarship_paid -= agent.money
+                self._fund_scholarship(-agent.money)
                 agent.money = 0.0
             if agent.loan > 0.0:
                 charge = agent.loan * LOAN_RATE
@@ -1369,6 +1407,8 @@ class Simulation:
             if agent.money < 0.0:
                 agent.money -= OVERDRAFT_FEE
                 self.overdraft_fees += OVERDRAFT_FEE
+            if agent.money < 0.0 and agent.loan - agent.money > BANKRUPTCY_DAYS * LIVING_COST:
+                self._bankrupt(agent)
             self._note_broke(agent, before)
 
     def _note_broke(self, agent: Agent, before: float) -> None:
@@ -1379,10 +1419,30 @@ class Simulation:
             agent.memory.add(self.clock.tick, "milestone", "Ran out of money")
             self.log(f"{agent.name} has run out of money")
 
+    def _pay(self, agent: Agent, gross: float) -> None:
+        """A wage: income tax to the treasury, the rest to the agent, and the
+        employer's training levy on top of it to the university."""
+        tax = 0.0 if agent.job.role_id == PORTER else gross * INCOME_TAX
+        agent.money += gross - tax
+        self.treasury += tax
+        self.tax_collected += tax
+        levy = gross * TRAINING_LEVY
+        self.university_fund += levy
+        self.levy_collected += levy
+
+    def _fund_scholarship(self, need: float) -> None:
+        """The university pays from its fund; the government covers the rest."""
+        from_fund = min(need, max(0.0, self.university_fund))
+        self.university_fund -= from_fund
+        self.treasury -= need - from_fund
+        self.scholarship_paid += need
+
     # --------------------------------------------------------------------- bank
 
     def _headroom(self, agent: Agent) -> float:
         """What Ledger Bank would still lend this agent."""
+        if self.clock.tick - agent.bankrupt_tick < BANKRUPTCY_BAN_DAYS * TICKS_PER_DAY:
+            return 0.0
         wage = agent.job.role.daily if agent.job is not None else None
         return credit_limit(wage) - agent.loan
 
@@ -1436,6 +1496,17 @@ class Simulation:
         self.lent += amount
         agent.memory.add(self.clock.tick, "milestone", f"Borrowed ${amount:.0f} from Ledger Bank")
         self.log(f"{agent.name} borrowed ${amount:.0f} from Ledger Bank")
+
+    def _bankrupt(self, agent: Agent) -> None:
+        """A month of living owed, written off: a clean slate, and no credit for a while."""
+        owed = agent.loan - agent.money
+        self.bankruptcies += 1
+        self.written_off += owed
+        agent.loan = 0.0
+        agent.money = 0.0
+        agent.bankrupt_tick = self.clock.tick
+        agent.memory.add(self.clock.tick, "milestone", f"Declared bankrupt: ${owed:.0f} written off")
+        self.log(f"{agent.name} was declared bankrupt")
 
     def _hire_porter(self, agent: Agent) -> None:
         """The floor: a porter's job at the market, no interview."""
